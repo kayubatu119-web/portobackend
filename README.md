@@ -1,0 +1,1 @@
+Swagger: https://projekgolang-production.up.railway.app/swagger/index.html

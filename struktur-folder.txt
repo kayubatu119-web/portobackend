@@ -1,0 +1,38 @@
+Folder PATH listing for volume DATA
+Volume serial number is 5C3D-24DC
+D:.
++---config	 # Konfigurasi aplikasi (environment variables)
++---database	 # Database related files
+|   \---sql_migrations	# Script migrasi database
++---docs	# Dokumentasi Swagger/OpenAPI
++---modules	# Core application modules
+|   +---components
+|   |   +---attachments
+|   |   |   +---models
+|   |   |   +---repository
+|   |   |   \---service		# Business logic file upload/download
+|   |   +---Auth
+|   |   |   +---controllers	# Handler untuk auth endpoints (register, login, logout)
+|   |   |   +---middleware	 # Middleware untuk autentikasi & autorisasi
+|   |   |   |   \---middlewarerole	# Middleware role-based access
+|   |   |   +---model		 # Data models (User, dll)
+|   |   |   +---repo		# Repository pattern - database operations
+|   |   |   +---service-user	# Business logic untuk user management
+|   |   |   \---util		# Utilities (JWT, password hashing, dll)
+|   |   +---command
+|   |   |   +---model
+|   |   |   +---repository
+|   |   |   \---service
+|   |   +---Mail
+|   |   |   \---service		 # Email sending functionality
+|   |   +---Project
+|   |   |   +---model		# Project data models
+|   |   |   +---repository	# Database operations untuk projects
+|   |   |   \---service		# Business logic projects & members
+|   |   \---Tasks
+|   |       +---model
+|   |       +---repository
+|   |       \---service
+|   \---ServiceRoute		# HTTP handlers & routing
+\---uploads
+    \---attachments		# file attachment upload
