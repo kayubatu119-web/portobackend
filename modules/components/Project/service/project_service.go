@@ -224,6 +224,7 @@ func (s *projectService) GetProjekService(ctx *gin.Context) (Project, error) {
 	return s.repository.GetProjekRepository(id)
 }
 
+// Service dengan struct binding
 func (s *projectService) UpdateProjekService(ctx *gin.Context) (Project, error) {
 	idStr := ctx.Param("id")
 	id, err := uuid.Parse(idStr)
@@ -237,39 +238,90 @@ func (s *projectService) UpdateProjekService(ctx *gin.Context) (Project, error) 
 		return Project{}, errors.New("projek tidak ditemukan")
 	}
 
-	var updateData map[string]interface{}
-	if err := ctx.ShouldBindJSON(&updateData); err != nil {
+	// Simpan image URL lama
+	oldImageURL := existingProject.ImageURL
+
+	// Handle file upload
+	file, err := ctx.FormFile("image")
+	if err != nil && err != http.ErrMissingFile {
+		return Project{}, fmt.Errorf("gagal mengambil file: %v", err)
+	}
+
+	imageURL := existingProject.ImageURL
+	if file != nil {
+		fmt.Printf("✅ File received for update: %s\n", file.Filename)
+
+		// Validasi file
+		if err := s.validateFile(file); err != nil {
+			return Project{}, err
+		}
+
+		// Generate unique filename
+		ext := filepath.Ext(file.Filename)
+		fileName := fmt.Sprintf("project_%s%s", uuid.New().String(), ext)
+		filePath := filepath.Join(s.uploadPath, fileName)
+
+		// Simpan file baru
+		if err := ctx.SaveUploadedFile(file, filePath); err != nil {
+			return Project{}, fmt.Errorf("gagal menyimpan file: %v", err)
+		}
+
+		imageURL = "/uploads/projects/" + fileName
+
+		// Hapus file lama jika bukan default
+		if oldImageURL != "" && oldImageURL != "#" {
+			oldFileName := filepath.Base(oldImageURL)
+			oldFilePath := filepath.Join(s.uploadPath, oldFileName)
+			os.Remove(oldFilePath) // Ignore error
+			fmt.Printf("🗑️ Deleted old file: %s\n", oldFilePath)
+		}
+	}
+
+	// Bind form data
+	var form ProjectUpdateForm
+	if err := ctx.ShouldBind(&form); err != nil {
+		// Cleanup file baru jika binding gagal
+		if file != nil {
+			newFileName := filepath.Base(imageURL)
+			newFilePath := filepath.Join(s.uploadPath, newFileName)
+			os.Remove(newFilePath)
+		}
 		return Project{}, fmt.Errorf("gagal binding data: %v", err)
 	}
 
-	// Update only fields that are present in request
-	if title, ok := updateData["title"].(string); ok {
-		existingProject.Title = title
+	// Update fields yang ada nilainya
+	if form.Title != "" {
+		existingProject.Title = form.Title
 	}
-	if description, ok := updateData["description"].(string); ok {
-		existingProject.Description = description
+	if form.Description != "" {
+		existingProject.Description = form.Description
 	}
-	if imageURL, ok := updateData["image_url"].(string); ok {
-		existingProject.ImageURL = imageURL
+	if form.DemoURL != "" {
+		existingProject.DemoURL = form.DemoURL
 	}
-	if demoURL, ok := updateData["demo_url"].(string); ok {
-		existingProject.DemoURL = demoURL
+	if form.CodeURL != "" {
+		existingProject.CodeURL = form.CodeURL
 	}
-	if codeURL, ok := updateData["code_url"].(string); ok {
-		existingProject.CodeURL = codeURL
+	if form.DisplayOrder != 0 {
+		existingProject.DisplayOrder = form.DisplayOrder
 	}
-	if displayOrder, ok := updateData["display_order"].(float64); ok {
-		existingProject.DisplayOrder = int(displayOrder)
-	}
-	if isFeatured, ok := updateData["is_featured"].(bool); ok {
-		existingProject.IsFeatured = isFeatured
-	}
-	if status, ok := updateData["status"].(string); ok {
-		existingProject.Status = status
+	existingProject.IsFeatured = form.IsFeatured
+	if form.Status != "" {
+		existingProject.Status = form.Status
 	}
 
+	// Update image URL
+	existingProject.ImageURL = imageURL
+
+	// Update di database
 	result, err := s.repository.UpdateProjekRepository(existingProject)
 	if err != nil {
+		// Cleanup file baru jika update gagal
+		if file != nil {
+			newFileName := filepath.Base(imageURL)
+			newFilePath := filepath.Join(s.uploadPath, newFileName)
+			os.Remove(newFilePath)
+		}
 		return Project{}, fmt.Errorf("gagal mengupdate projek: %v", err)
 	}
 

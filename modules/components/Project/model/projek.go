@@ -34,14 +34,13 @@ type ProjectForm struct {
 }
 
 type ProjectUpdateForm struct {
-	Title        string `json:"title" binding:"required"`
-	Description  string `json:"description" binding:"required"`
-	ImageURL     string `json:"image_url"`
-	DemoURL      string `json:"demo_url"`
-	CodeURL      string `json:"code_url" binding:"required"`
-	DisplayOrder int    `json:"display_order"`
-	IsFeatured   bool   `json:"is_featured"`
-	Status       string `json:"status"`
+	Title        string `form:"title"`
+	Description  string `form:"description"`
+	DemoURL      string `form:"demo_url"`
+	CodeURL      string `form:"code_url"`
+	DisplayOrder int    `form:"display_order"`
+	IsFeatured   bool   `form:"is_featured"`
+	Status       string `form:"status"`
 }
 
 type ProjectTag struct {
