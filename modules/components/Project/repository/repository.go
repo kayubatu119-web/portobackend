@@ -3,7 +3,9 @@ package projectrepo
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	. "gintugas/modules/components/Project/model"
+	"strings"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -263,9 +265,9 @@ func (r *repository) GetAllProjekWithTagsRepository() ([]Project, error) {
 	defer projectRows.Close()
 
 	var projects []Project
-	projectMap := make(map[uuid.UUID]*Project) // Untuk mapping cepat
+	var projectIDs []uuid.UUID
 
-	// Scan semua projects
+	// Scan semua projects dan kumpulkan IDs
 	for projectRows.Next() {
 		var project Project
 		err := projectRows.Scan(
@@ -285,18 +287,58 @@ func (r *repository) GetAllProjekWithTagsRepository() ([]Project, error) {
 			return nil, err
 		}
 
-		// Initialize tags slice
-		project.Tags = []ProjectTag{}
+		project.Tags = []ProjectTag{} // Initialize empty tags
 		projects = append(projects, project)
-		projectMap[project.ID] = &projects[len(projects)-1]
+		projectIDs = append(projectIDs, project.ID)
 	}
 
 	if len(projects) == 0 {
 		return projects, nil
 	}
 
-	// Query untuk mendapatkan semua tags dari semua projects sekaligus (lebih efisien)
-	tagsQuery := `
+	// Jika ada project IDs, load tags
+	if len(projectIDs) > 0 {
+		// Buat map untuk akses cepat ke project berdasarkan ID
+		projectMap := make(map[uuid.UUID]*Project)
+		for i := range projects {
+			projectMap[projects[i].ID] = &projects[i]
+		}
+
+		// Load tags untuk semua projects
+		tags, err := r.getTagsForMultipleProjects(projectIDs)
+		if err != nil {
+			// Jika error loading tags, return projects tanpa tags
+			return projects, nil
+		}
+
+		// Assign tags ke masing-masing project
+		for projectID, projectTags := range tags {
+			if project, exists := projectMap[projectID]; exists {
+				project.Tags = projectTags
+			}
+		}
+	}
+
+	return projects, nil
+}
+
+// Helper function untuk mendapatkan tags untuk multiple projects
+func (r *repository) getTagsForMultipleProjects(projectIDs []uuid.UUID) (map[uuid.UUID][]ProjectTag, error) {
+	// Convert UUID slice to string slice untuk query
+	idStrs := make([]string, len(projectIDs))
+	for i, id := range projectIDs {
+		idStrs[i] = id.String()
+	}
+
+	// Buat placeholder untuk query ($1, $2, $3, ...)
+	placeholders := make([]string, len(projectIDs))
+	params := make([]interface{}, len(projectIDs))
+	for i := range projectIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		params[i] = projectIDs[i]
+	}
+
+	query := fmt.Sprintf(`
 		SELECT 
 			ptr.project_id,
 			pt.id,
@@ -305,22 +347,23 @@ func (r *repository) GetAllProjekWithTagsRepository() ([]Project, error) {
 			pt.created_at
 		FROM project_tag_relations ptr
 		INNER JOIN project_tags pt ON ptr.tag_id = pt.id
-		INNER JOIN portfolio_projects pp ON ptr.project_id = pp.id
+		WHERE ptr.project_id IN (%s)
 		ORDER BY ptr.project_id, pt.name
-	`
+	`, strings.Join(placeholders, ","))
 
-	tagRows, err := r.db.Query(tagsQuery)
+	rows, err := r.db.Query(query, params...)
 	if err != nil {
-		return projects, err // Return projects tanpa tags jika error
+		return nil, err
 	}
-	defer tagRows.Close()
+	defer rows.Close()
 
-	// Map tags ke projects yang sesuai
-	for tagRows.Next() {
+	tagsMap := make(map[uuid.UUID][]ProjectTag)
+
+	for rows.Next() {
 		var projectID uuid.UUID
 		var tag ProjectTag
 
-		err := tagRows.Scan(
+		err := rows.Scan(
 			&projectID,
 			&tag.ID,
 			&tag.Name,
@@ -331,13 +374,10 @@ func (r *repository) GetAllProjekWithTagsRepository() ([]Project, error) {
 			return nil, err
 		}
 
-		// Tambahkan tag ke project yang sesuai
-		if project, exists := projectMap[projectID]; exists {
-			project.Tags = append(project.Tags, tag)
-		}
+		tagsMap[projectID] = append(tagsMap[projectID], tag)
 	}
 
-	return projects, nil
+	return tagsMap, nil
 }
 
 func (r *tagsRepository) CreateTags(Tags *ProjectTag) error {
