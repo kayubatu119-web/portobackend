@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"gintugas/database"
 	_ "gintugas/docs"
 	routers "gintugas/modules"
 	"log"
@@ -66,7 +67,7 @@ func main() {
 		log.Fatal("Failed to create GORM connection:", err)
 	}
 
-	// database.DBMigrate(db)
+	database.DBMigrate(db)
 
 	InitiateRouter(db, gormDB)
 }
