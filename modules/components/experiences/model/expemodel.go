@@ -11,18 +11,22 @@ import (
 // ============================
 
 type Experience struct {
-	ID               uuid.UUID                  `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
-	Title            string                     `json:"title" gorm:"type:varchar(200);not null"`
-	Company          string                     `json:"company" gorm:"type:varchar(150);not null"`
-	Location         string                     `json:"location" gorm:"type:varchar(200);not null"`
-	StartYears       string                     `json:"start_year" gorm:"column:start_year;type:varchar(20);not null"`
-	EndYears         string                     `json:"end_year" gorm:"column:end_year;type:varchar(20);not null"`
-	CurrentJob       bool                       `json:"current_job" gorm:"column:current_job;type:boolean;default:false"`
-	DisplayOrder     int                        `json:"display_order" gorm:"type:integer;default:0"`
-	Responsibilities []ExperienceResponsibility `json:"responsibilities" gorm:"foreignKey:ExperienceID;references:ID"`
-	Skills           []ExperienceSkill          `json:"skills" gorm:"foreignKey:ExperienceID;references:ID"`
-	CreatedAt        time.Time                  `json:"created_at" gorm:"default:CURRENT_TIMESTAMP"`
-	UpdatedAt        time.Time                  `json:"updated_at" gorm:"default:CURRENT_TIMESTAMP"`
+	ID           uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
+	Title        string    `json:"title" gorm:"type:varchar(200);not null"`
+	Company      string    `json:"company" gorm:"type:varchar(150);not null"`
+	Location     string    `json:"location" gorm:"type:varchar(200);not null"`
+	StartYears   string    `json:"start_year" gorm:"column:start_year;type:varchar(20);not null"`
+	EndYears     string    `json:"end_year" gorm:"column:end_year;type:varchar(20);not null"`
+	CurrentJob   bool      `json:"current_job" gorm:"column:current_job;type:boolean;default:false"`
+	DisplayOrder int       `json:"display_order" gorm:"type:integer;default:0"`
+	CreatedAt    time.Time `json:"created_at" gorm:"default:CURRENT_TIMESTAMP"`
+	UpdatedAt    time.Time `json:"updated_at" gorm:"default:CURRENT_TIMESTAMP"`
+}
+
+type ExperienceWithRelations struct {
+	Experience
+	Responsibilities []ExperienceResponsibility `json:"responsibilities"`
+	Skills           []ExperienceSkill          `json:"skills"`
 }
 
 func (Experience) TableName() string {

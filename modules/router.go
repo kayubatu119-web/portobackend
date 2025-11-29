@@ -50,11 +50,8 @@ func Initiator(router *gin.Engine, db *sql.DB, gormDB *gorm.DB) {
 	// EXPERIENCE DEPENDENCIES
 	// ============================
 	expeRepo := repo.NewExpeGormRepository(gormDB)
-	expeSqlRepo := repo.NewDbExpeRepository(db)
 	expeService := service.NewExpeService(expeRepo)
-	expeSqlService := service.NewExpeSqlService(expeSqlRepo)
 	expeHandler := serviceroute.NewGormExpeHandler(expeService)
-	expeSqlHandler := serviceroute.NewExpeSqlHandler(expeSqlService)
 
 	// ============================
 	// PORTFOLIO DEPENDENCIES
@@ -145,8 +142,6 @@ func Initiator(router *gin.Engine, db *sql.DB, gormDB *gorm.DB) {
 			expeRoutes.GET("/experiences/with-relations/:id", expeHandler.GetExperiencesByIDWithRelations)
 			expeRoutes.PUT("/experiences/with-relations/:id", expeHandler.UpdateExperiencesWithRelations)
 			expeRoutes.DELETE("/experiences/with-relations/:id", expeHandler.DeleteExperiencesWithRelations)
-			expeRoutes.GET("/experiences", expeSqlHandler.GetAllExperience)
-			expeRoutes.GET("/experiences/with-relations-sql", expeSqlHandler.GetAllExperiencesWithRelations)
 		}
 
 		// ============================

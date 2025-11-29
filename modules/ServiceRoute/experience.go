@@ -17,16 +17,6 @@ func NewGormExpeHandler(expeService service.ExperiencesService) *GormExpeHandler
 	}
 }
 
-type ExpeSQLHandler struct {
-	expeSqlService service.ExpeService
-}
-
-func NewExpeSqlHandler(expeSqlService service.ExpeService) *ExpeSQLHandler {
-	return &ExpeSQLHandler{
-		expeSqlService: expeSqlService,
-	}
-}
-
 // ============================
 // GORM HANDLERS
 // ============================
@@ -101,35 +91,5 @@ func (c *GormExpeHandler) GetAllExperiencesWithRelations(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{
 		"message":     "All experiences with relations retrieved successfully",
 		"experiences": experiences,
-	})
-}
-
-// ============================
-// SQL HANDLERS
-// ============================
-
-func (h *ExpeSQLHandler) GetAllExperience(c *gin.Context) {
-	experiences, err := h.expeSqlService.GetAllExperience(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Experiences retrieved successfully",
-		"data":    experiences,
-	})
-}
-
-func (h *ExpeSQLHandler) GetAllExperiencesWithRelations(c *gin.Context) {
-	experiences, err := h.expeSqlService.GetAllExperiencesWithRelations(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Experiences with relations retrieved successfully",
-		"data":    experiences,
 	})
 }

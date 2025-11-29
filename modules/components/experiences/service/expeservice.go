@@ -28,39 +28,22 @@ func NewExpeService(experienceRepo repo.ExperiencesRepository) ExperiencesServic
 	}
 }
 
-type ExpeService interface {
-	GetAllExperience(ctx *gin.Context) (result []model.Experience, err error)
-	GetAllExperiencesWithRelations(ctx *gin.Context) ([]model.ExperienceResponse, error)
-}
-
-type expeService struct {
-	expeRepo repo.DbExperienceRepository
-}
-
-func NewExpeSqlService(expeRepo repo.DbExperienceRepository) ExpeService {
-	return &expeService{
-		expeRepo: expeRepo,
-	}
-}
-
-// ============================
-// GORM SERVICE IMPLEMENTATION
-// ============================
-
 func (s *experiencesService) CreateExperienceWithRelations(ctx *gin.Context) (*model.ExperienceResponse, error) {
 	var experienceReq model.ExperienceRequest
 	if err := ctx.ShouldBindJSON(&experienceReq); err != nil {
 		return nil, err
 	}
 
-	experience := &model.Experience{
-		Title:        experienceReq.Title,
-		Company:      experienceReq.Company,
-		Location:     experienceReq.Location,
-		StartYears:   experienceReq.StartYears,
-		EndYears:     experienceReq.EndYears,
-		CurrentJob:   experienceReq.CurrentJob,
-		DisplayOrder: experienceReq.DisplayOrder,
+	experience := &model.ExperienceWithRelations{
+		Experience: model.Experience{
+			Title:        experienceReq.Title,
+			Company:      experienceReq.Company,
+			Location:     experienceReq.Location,
+			StartYears:   experienceReq.StartYears,
+			EndYears:     experienceReq.EndYears,
+			CurrentJob:   experienceReq.CurrentJob,
+			DisplayOrder: experienceReq.DisplayOrder,
+		},
 	}
 
 	// Convert responsibilities
@@ -186,78 +169,7 @@ func (s *experiencesService) GetAllExperiencesWithRelations(ctx *gin.Context) ([
 	return responses, nil
 }
 
-// ============================
-// SQL SERVICE IMPLEMENTATION
-// ============================
-
-func (s *expeService) GetAllExperience(ctx *gin.Context) ([]model.Experience, error) {
-	experiences, err := s.expeRepo.GetAllExperience()
-	if err != nil {
-		return nil, errors.New("gagal mengambil data Experiences: " + err.Error())
-	}
-	return experiences, nil
-}
-
-func (s *expeService) GetAllExperiencesWithRelations(ctx *gin.Context) ([]model.ExperienceResponse, error) {
-	experiences, err := s.expeRepo.GetAllExperiencesWithRelations()
-	if err != nil {
-		return nil, errors.New("gagal mengambil data Experiences dengan relations: " + err.Error())
-	}
-
-	var responses []model.ExperienceResponse
-	for _, exp := range experiences {
-		responses = append(responses, *convertToResponseSQL(&exp))
-	}
-
-	return responses, nil
-}
-
-// ============================
-// HELPER FUNCTIONS
-// ============================
-
-// Di service.go, perbaiki convertToResponse function:
-
-func (s *experiencesService) convertToResponse(experience *model.Experience) *model.ExperienceResponse {
-	// Convert responsibilities
-	var respResponses []model.ResponsibilityResponse
-	for _, resp := range experience.Responsibilities {
-		respResponses = append(respResponses, model.ResponsibilityResponse{
-			ID:           resp.ID,
-			ExperienceID: resp.ExperienceID,
-			Description:  resp.Description,
-			DisplayOrder: resp.DisplayOrder,
-			CreatedAt:    resp.CreatedAt,
-		})
-	}
-
-	// Convert skills - tanpa CreatedAt
-	var skillResponses []model.SkillResponse
-	for _, skill := range experience.Skills {
-		skillResponses = append(skillResponses, model.SkillResponse{
-			ExperienceID: skill.ExperienceID,
-			SkillName:    skill.SkillName,
-			// HAPUS CreatedAt
-		})
-	}
-
-	return &model.ExperienceResponse{
-		ID:               experience.ID,
-		Title:            experience.Title,
-		Company:          experience.Company,
-		Location:         experience.Location,
-		StartYears:       experience.StartYears,
-		EndYears:         experience.EndYears,
-		CurrentJob:       experience.CurrentJob,
-		DisplayOrder:     experience.DisplayOrder,
-		Responsibilities: respResponses,
-		Skills:           skillResponses,
-		CreatedAt:        experience.CreatedAt,
-		UpdatedAt:        experience.UpdatedAt,
-	}
-}
-
-func convertToResponseSQL(experience *model.Experience) *model.ExperienceResponse {
+func (s *experiencesService) convertToResponse(experience *model.ExperienceWithRelations) *model.ExperienceResponse {
 	// Convert responsibilities
 	var respResponses []model.ResponsibilityResponse
 	for _, resp := range experience.Responsibilities {
