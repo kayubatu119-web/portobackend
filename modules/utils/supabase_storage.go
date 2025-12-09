@@ -20,30 +20,56 @@ type SupabaseUploadService struct {
 	bucket      string
 	supabaseURL string
 	projectID   string
+	apiKey      string // ⭐ TAMBAHKAN INI
 }
 
 func NewSupabaseUploadService(supabaseURL, supabaseKey, bucket string) *SupabaseUploadService {
 	client := storage.NewClient(supabaseURL, supabaseKey, nil)
 	projectID := extractProjectID(supabaseURL)
 
-	fmt.Printf("🔧 Initializing Supabase Storage: %s, Bucket: %s\n", projectID, bucket)
+	fmt.Printf("🔧 Initializing Supabase Storage\n")
+	fmt.Printf("   URL: %s\n", supabaseURL)
+	fmt.Printf("   Project ID: %s\n", projectID)
+	fmt.Printf("   Bucket: %s\n", bucket)
+	fmt.Printf("   Key (first 10 chars): %s\n", supabaseKey[:10])
+
+	// Test connection
+	testPath := "test-connection.txt"
+	testData := []byte("test connection")
+	_, err := client.UploadFile(bucket, testPath, bytes.NewReader(testData))
+	if err != nil {
+		fmt.Printf("⚠️  Initial connection test failed: %v\n", err)
+	} else {
+		fmt.Printf("✅ Connection test successful\n")
+		// Cleanup test file
+		client.RemoveFile(bucket, []string{testPath})
+	}
 
 	return &SupabaseUploadService{
 		client:      client,
 		bucket:      bucket,
 		supabaseURL: supabaseURL,
 		projectID:   projectID,
+		apiKey:      supabaseKey, // ⭐ SIMPAN API KEY
 	}
 }
 
 func extractProjectID(supabaseURL string) string {
 	url := strings.TrimPrefix(supabaseURL, "https://")
 	url = strings.TrimPrefix(url, "http://")
-	parts := strings.Split(url, ".supabase.co")
-	if len(parts) > 0 {
-		return parts[0]
+	url = strings.TrimPrefix(url, "www.")
+
+	// Remove path and query params
+	parts := strings.Split(url, "/")
+	hostname := parts[0]
+
+	// Extract project ID from *.supabase.co
+	if strings.HasSuffix(hostname, ".supabase.co") {
+		projectID := strings.TrimSuffix(hostname, ".supabase.co")
+		return projectID
 	}
-	return ""
+
+	return hostname
 }
 
 // UploadFile mengupload file ke Supabase Storage
@@ -68,61 +94,98 @@ func (s *SupabaseUploadService) UploadFile(file *multipart.FileHeader, folder st
 	// Generate unique filename
 	ext := filepath.Ext(file.Filename)
 	if ext == "" {
-		ext = ".jpg"
+		ext = ".png"
 	}
 	filename := fmt.Sprintf("%s%s", uuid.New().String(), ext)
 
 	// Path di Supabase Storage
 	storagePath := filename
-	if folder != "" && folder != "/" {
+	if folder != "" {
 		folder = strings.Trim(folder, "/")
 		storagePath = fmt.Sprintf("%s/%s", folder, filename)
 	}
 
-	fmt.Printf("📤 Uploading to: %s/%s (Size: %d bytes)\n", s.bucket, storagePath, len(fileBytes))
+	fmt.Printf("📤 Uploading file:\n")
+	fmt.Printf("   Original: %s\n", file.Filename)
+	fmt.Printf("   Storage Path: %s\n", storagePath)
+	fmt.Printf("   Size: %d bytes\n", len(fileBytes))
+	fmt.Printf("   Content-Type: %s\n", file.Header.Get("Content-Type"))
 
-	// Upload ke Supabase Storage
-	_, err = s.client.UploadFile(s.bucket, storagePath, bytes.NewReader(fileBytes))
+	// Upload ke Supabase Storage menggunakan HTTP API langsung
+	// (Lebih reliable daripada library client)
+	publicURL, err := s.uploadViaHTTP(fileBytes, storagePath, file.Header.Get("Content-Type"))
 	if err != nil {
-		// Coba upload dengan HTTP langsung
-		return s.uploadViaHTTP(fileBytes, storagePath, file.Header.Get("Content-Type"))
+		return "", fmt.Errorf("upload failed: %v", err)
 	}
 
-	// Generate public URL
-	publicURL := s.GetPublicURL(storagePath)
 	fmt.Printf("✅ Upload successful: %s\n", publicURL)
-
 	return publicURL, nil
 }
 
-// uploadViaHTTP alternatif upload method
+// uploadViaHTTP menggunakan HTTP API langsung
 func (s *SupabaseUploadService) uploadViaHTTP(data []byte, path, contentType string) (string, error) {
 	if contentType == "" {
-		contentType = "application/octet-stream"
+		// Determine content type from extension
+		ext := filepath.Ext(path)
+		switch strings.ToLower(ext) {
+		case ".jpg", ".jpeg":
+			contentType = "image/jpeg"
+		case ".png":
+			contentType = "image/png"
+		case ".gif":
+			contentType = "image/gif"
+		case ".webp":
+			contentType = "image/webp"
+		case ".svg":
+			contentType = "image/svg+xml"
+		default:
+			contentType = "application/octet-stream"
+		}
 	}
 
-	url := fmt.Sprintf("%s/storage/v1/object/%s/%s", s.supabaseURL, s.bucket, path)
+	// URL format: https://project-id.supabase.co/storage/v1/object/bucket/path
+	uploadURL := fmt.Sprintf("%s/storage/v1/object/%s/%s",
+		strings.TrimSuffix(s.supabaseURL, "/"),
+		s.bucket,
+		path,
+	)
 
-	req, err := http.NewRequest("POST", url, bytes.NewReader(data))
+	fmt.Printf("   Upload URL: %s\n", uploadURL)
+
+	req, err := http.NewRequest("POST", uploadURL, bytes.NewReader(data))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to create request: %v", err)
 	}
 
+	// ⚠️ PERBAIKAN: Gunakan API key langsung, bukan s.client.AccessToken
+	// Anda perlu menyimpan API key di struct
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", s.apiKey))
 	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Cache-Control", "no-cache")
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
+	body, _ := io.ReadAll(resp.Body)
+
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("upload failed: %s - %s", resp.Status, string(body))
+		fmt.Printf("   ❌ Upload failed: %s\n", resp.Status)
+		fmt.Printf("   Response: %s\n", string(body))
+		return "", fmt.Errorf("upload failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
-	return s.GetPublicURL(path), nil
+	// Construct public URL
+	publicURL := fmt.Sprintf("%s/storage/v1/object/public/%s/%s",
+		strings.TrimSuffix(s.supabaseURL, "/"),
+		s.bucket,
+		path,
+	)
+
+	return publicURL, nil
 }
 
 func (s *SupabaseUploadService) DeleteFile(fileURL string) error {
@@ -141,25 +204,30 @@ func (s *SupabaseUploadService) DeleteFile(fileURL string) error {
 }
 
 func (s *SupabaseUploadService) extractFilePathFromURL(fileURL string) string {
-	prefix := "/storage/v1/object/public/"
-	idx := strings.Index(fileURL, prefix)
-	if idx == -1 {
-		return ""
+	// Pattern: https://project-id.supabase.co/storage/v1/object/public/bucket/path/to/file
+	prefixes := []string{
+		"/storage/v1/object/public/",
+		"storage/v1/object/public/",
 	}
 
-	pathWithBucket := fileURL[idx+len(prefix):]
-	parts := strings.SplitN(pathWithBucket, "/", 2)
-	if len(parts) < 2 {
-		return ""
+	for _, prefix := range prefixes {
+		idx := strings.Index(fileURL, prefix)
+		if idx != -1 {
+			pathWithBucket := fileURL[idx+len(prefix):]
+			parts := strings.SplitN(pathWithBucket, "/", 2)
+			if len(parts) == 2 && parts[0] == s.bucket {
+				return parts[1]
+			}
+		}
 	}
 
-	return parts[1]
+	return ""
 }
 
 func (s *SupabaseUploadService) GetPublicURL(filePath string) string {
 	filePath = strings.TrimPrefix(filePath, "/")
-	return fmt.Sprintf("https://%s.supabase.co/storage/v1/object/public/%s/%s",
-		s.projectID,
+	return fmt.Sprintf("%s/storage/v1/object/public/%s/%s",
+		strings.TrimSuffix(s.supabaseURL, "/"),
 		s.bucket,
 		filePath,
 	)

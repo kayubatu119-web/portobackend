@@ -14,6 +14,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	// Import portfolio components
@@ -42,22 +43,24 @@ func Initiator(router *gin.Engine, db *sql.DB, gormDB *gorm.DB) {
 	// ============================
 	// CREATE UPLOAD SERVICES
 	// ============================
-	var supabaseUploadService *utils.SupabaseUploadService
-	var uploadProvider string
+	fmt.Println("=== STORAGE CONFIGURATION ===")
 
-	// Setup Supabase Storage jika ada konfigurasi
 	supabaseURL := os.Getenv("SUPABASE_URL")
-	supabaseKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
-	if supabaseKey == "" {
-		supabaseKey = os.Getenv("SUPABASE_ANON_KEY")
-	}
+	supabaseServiceKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
 	bucket := os.Getenv("SUPABASE_STORAGE_BUCKET")
-	if bucket == "" {
-		bucket = "uploads"
-	}
+	uploadProvider := os.Getenv("UPLOAD_PROVIDER")
 
-	if supabaseURL != "" && supabaseKey != "" {
-		supabaseUploadService = utils.NewSupabaseUploadService(supabaseURL, supabaseKey, bucket)
+	fmt.Printf("SUPABASE_URL: %s\n", supabaseURL)
+	fmt.Printf("SUPABASE_SERVICE_ROLE_KEY: %s\n",
+		strings.Repeat("*", len(supabaseServiceKey)-10)+supabaseServiceKey[len(supabaseServiceKey)-10:])
+	fmt.Printf("SUPABASE_STORAGE_BUCKET: %s\n", bucket)
+	fmt.Printf("UPLOAD_PROVIDER: %s\n", uploadProvider)
+
+	var supabaseUploadService *utils.SupabaseUploadService
+
+	// Setup Supabase Storage
+	if supabaseURL != "" && supabaseServiceKey != "" {
+		supabaseUploadService = utils.NewSupabaseUploadService(supabaseURL, supabaseServiceKey, bucket)
 		uploadProvider = "supabase"
 		fmt.Println("✅ Supabase Storage initialized")
 	} else {

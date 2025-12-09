@@ -159,24 +159,28 @@ func (s *projectService) CreateProjekWithImageService(ctx *gin.Context) (Project
 
 	// Bind form data
 	if err := ctx.ShouldBind(&form); err != nil {
+		fmt.Printf("❌ Bind form error: %v\n", err)
 		return Project{}, fmt.Errorf("gagal binding data: %v", err)
 	}
+
+	fmt.Printf("📝 Form data received:\n")
+	fmt.Printf("   Title: %s\n", form.Title)
+	fmt.Printf("   Description: %s\n", form.Description)
 
 	// Validasi required fields
 	if form.Title == "" {
 		return Project{}, errors.New("judul projek harus diisi")
 	}
 
-	if form.Description == "" {
-		return Project{}, errors.New("deskripsi projek harus diisi")
-	}
-
 	// Handle file upload
 	file, err := ctx.FormFile("image")
-
 	imageURL := ""
+
 	if err == nil && file != nil {
-		fmt.Printf("✅ File received: %s, Size: %d bytes\n", file.Filename, file.Size)
+		fmt.Printf("📁 File received:\n")
+		fmt.Printf("   Filename: %s\n", file.Filename)
+		fmt.Printf("   Size: %d bytes\n", file.Size)
+		fmt.Printf("   MIME Type: %s\n", file.Header.Get("Content-Type"))
 
 		// Validasi file
 		if err := s.validateFile(file); err != nil {
@@ -184,19 +188,23 @@ func (s *projectService) CreateProjekWithImageService(ctx *gin.Context) (Project
 			return Project{}, err
 		}
 
-		// Upload file ke storage (Supabase atau Local)
+		fmt.Printf("🔄 Starting upload process...\n")
+
+		// Upload file ke storage
 		imageURL, err = s.uploadService.UploadFile(file, "projects")
 		if err != nil {
 			fmt.Printf("❌ Upload failed: %v\n", err)
 			return Project{}, fmt.Errorf("gagal mengupload file: %v", err)
 		}
 
-		fmt.Printf("🔗 Image uploaded successfully: %s\n", imageURL)
-	} else if err != http.ErrMissingFile {
-		// Error selain "file tidak diupload"
-		fmt.Printf("⚠️ Error getting file: %v\n", err)
-	} else {
-		fmt.Println("ℹ️ No file uploaded, will not set image URL")
+		fmt.Printf("✅ Image uploaded successfully: %s\n", imageURL)
+	} else if err != nil {
+		fmt.Printf("⚠️ File error: %v\n", err)
+		if err != http.ErrMissingFile {
+			fmt.Printf("⚠️ Unexpected file error: %v\n", err)
+		} else {
+			fmt.Println("ℹ️ No image file provided, continuing without image")
+		}
 	}
 
 	// Set default values
@@ -222,16 +230,21 @@ func (s *projectService) CreateProjekWithImageService(ctx *gin.Context) (Project
 		Status:       form.Status,
 	}
 
+	fmt.Printf("💾 Saving project to database...\n")
 	result, err := s.repository.CreateProjekRepository(project)
 	if err != nil {
+		fmt.Printf("❌ Database save failed: %v\n", err)
 		// Cleanup uploaded file jika gagal menyimpan data
 		if imageURL != "" {
+			fmt.Printf("🧹 Cleaning up uploaded file: %s\n", imageURL)
 			s.uploadService.DeleteFile(imageURL)
 		}
 		return Project{}, fmt.Errorf("gagal menyimpan data projek: %v", err)
 	}
 
 	fmt.Printf("✅ Project created successfully with ID: %s\n", result.ID)
+	fmt.Printf("   Image URL: %s\n", result.ImageURL)
+
 	return result, nil
 }
 
