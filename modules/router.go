@@ -51,21 +51,57 @@ func Initiator(router *gin.Engine, db *sql.DB, gormDB *gorm.DB) {
 	uploadProvider := os.Getenv("UPLOAD_PROVIDER")
 
 	fmt.Printf("SUPABASE_URL: %s\n", supabaseURL)
-	fmt.Printf("SUPABASE_SERVICE_ROLE_KEY: %s\n",
-		strings.Repeat("*", len(supabaseServiceKey)-10)+supabaseServiceKey[len(supabaseServiceKey)-10:])
+
+	// ⭐ PERBAIKAN: Cek panjang key sebelum menggunakan strings.Repeat
+	if supabaseServiceKey != "" && len(supabaseServiceKey) > 10 {
+		fmt.Printf("SUPABASE_SERVICE_ROLE_KEY: %s\n",
+			strings.Repeat("*", len(supabaseServiceKey)-10)+supabaseServiceKey[len(supabaseServiceKey)-10:])
+	} else if supabaseServiceKey != "" {
+		fmt.Printf("SUPABASE_SERVICE_ROLE_KEY: %s\n", strings.Repeat("*", len(supabaseServiceKey)))
+	} else {
+		fmt.Printf("SUPABASE_SERVICE_ROLE_KEY: (not set)\n")
+	}
+
 	fmt.Printf("SUPABASE_STORAGE_BUCKET: %s\n", bucket)
 	fmt.Printf("UPLOAD_PROVIDER: %s\n", uploadProvider)
+
+	// ⭐ PERBAIKAN: Debug semua env variables
+	fmt.Println("\n=== ENVIRONMENT VARIABLES ===")
+	envVars := []string{
+		"SUPABASE_URL",
+		"SUPABASE_ANON_KEY",
+		"SUPABASE_SERVICE_ROLE_KEY",
+		"SUPABASE_STORAGE_BUCKET",
+		"UPLOAD_PROVIDER",
+		"GIN_MODE",
+	}
+
+	for _, env := range envVars {
+		value := os.Getenv(env)
+		if value == "" {
+			fmt.Printf("⚠️  %s: (not set)\n", env)
+		} else {
+			fmt.Printf("✅ %s: %s\n", env, value[:min(len(value), 50)])
+		}
+	}
 
 	var supabaseUploadService *utils.SupabaseUploadService
 
 	// Setup Supabase Storage
 	if supabaseURL != "" && supabaseServiceKey != "" {
+		fmt.Println("\n🔄 Initializing Supabase Storage...")
 		supabaseUploadService = utils.NewSupabaseUploadService(supabaseURL, supabaseServiceKey, bucket)
 		uploadProvider = "supabase"
 		fmt.Println("✅ Supabase Storage initialized")
 	} else {
 		uploadProvider = "local"
-		fmt.Println("⚠️  Supabase Storage not configured, using local storage")
+		fmt.Println("\n⚠️  Supabase Storage not configured, using local storage")
+		if supabaseURL == "" {
+			fmt.Println("   Reason: SUPABASE_URL is empty")
+		}
+		if supabaseServiceKey == "" {
+			fmt.Println("   Reason: SUPABASE_SERVICE_ROLE_KEY is empty")
+		}
 	}
 
 	// ============================
@@ -79,12 +115,13 @@ func Initiator(router *gin.Engine, db *sql.DB, gormDB *gorm.DB) {
 		supabaseWrapper := projectServsc.NewSupabaseUploadWrapper(supabaseUploadService)
 		// Use existing NewService but pass upload wrapper
 		projectService = projectServsc.NewServiceWithUpload(projectRepo, supabaseWrapper, "projects")
+		fmt.Println("📁 Project Service: Using Supabase Storage")
 	} else {
 		// Use local storage
 		localPath := filepath.Join(uploadBasePath, "projects")
 		projectService = projectServsc.NewService(projectRepo, localPath)
+		fmt.Println("📁 Project Service: Using Local Storage")
 	}
-
 	projectHandler := handlers.NewProjectHandler(projectService)
 
 	memberRepo := repositoryprojek.NewProjectMemberRepo(gormDB)
@@ -342,4 +379,11 @@ func createUploadDirs(basePath string) {
 			log.Printf("Created upload directory: %s", fullPath)
 		}
 	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
