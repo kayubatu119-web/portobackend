@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,19 +18,15 @@ import (
 type SupabaseUploadService struct {
 	client      *storage.Client
 	bucket      string
-	supabaseURL string // Untuk generate public URL
-	projectID   string // Extract dari supabaseURL
+	supabaseURL string
+	projectID   string
 }
 
-// NewSupabaseUploadService membuat instance baru
-// supabaseURL format: https://[PROJECT_ID].supabase.co
-// Contoh: https://yiujndqqbacipqozosdm.supabase.co
 func NewSupabaseUploadService(supabaseURL, supabaseKey, bucket string) *SupabaseUploadService {
 	client := storage.NewClient(supabaseURL, supabaseKey, nil)
-
-	// Extract project ID dari supabaseURL
-	// https://yiujndqqbacipqozosdm.supabase.co -> yiujndqqbacipqozosdm
 	projectID := extractProjectID(supabaseURL)
+
+	fmt.Printf("🔧 Initializing Supabase Storage: %s, Bucket: %s\n", projectID, bucket)
 
 	return &SupabaseUploadService{
 		client:      client,
@@ -40,11 +37,8 @@ func NewSupabaseUploadService(supabaseURL, supabaseKey, bucket string) *Supabase
 }
 
 func extractProjectID(supabaseURL string) string {
-	// Hapus protocol
 	url := strings.TrimPrefix(supabaseURL, "https://")
 	url = strings.TrimPrefix(url, "http://")
-
-	// Ambil bagian sebelum .supabase.co
 	parts := strings.Split(url, ".supabase.co")
 	if len(parts) > 0 {
 		return parts[0]
@@ -52,40 +46,8 @@ func extractProjectID(supabaseURL string) string {
 	return ""
 }
 
-// ValidateFile memvalidasi file sebelum upload
-func (s *SupabaseUploadService) ValidateFile(file *multipart.FileHeader, maxSizeMB int64, allowedExts []string) error {
-	if file == nil {
-		return errors.New("file tidak ditemukan")
-	}
-
-	// Check ukuran file
-	maxSize := maxSizeMB * 1024 * 1024
-	if file.Size > maxSize {
-		return fmt.Errorf("ukuran file maksimal %dMB", maxSizeMB)
-	}
-
-	// Check extension
-	ext := strings.ToLower(filepath.Ext(file.Filename))
-	isAllowed := false
-	for _, allowedExt := range allowedExts {
-		if ext == allowedExt {
-			isAllowed = true
-			break
-		}
-	}
-
-	if !isAllowed {
-		extStr := strings.Join(allowedExts, ", ")
-		return fmt.Errorf("tipe file tidak diizinkan. File yang diizinkan: %s", extStr)
-	}
-
-	return nil
-}
-
 // UploadFile mengupload file ke Supabase Storage
-// Mengembalikan public URL yang bisa diakses langsung
 func (s *SupabaseUploadService) UploadFile(file *multipart.FileHeader, folder string) (string, error) {
-	// Validasi file tidak kosong
 	if file == nil {
 		return "", errors.New("file tidak ditemukan")
 	}
@@ -105,32 +67,65 @@ func (s *SupabaseUploadService) UploadFile(file *multipart.FileHeader, folder st
 
 	// Generate unique filename
 	ext := filepath.Ext(file.Filename)
+	if ext == "" {
+		ext = ".jpg"
+	}
 	filename := fmt.Sprintf("%s%s", uuid.New().String(), ext)
 
 	// Path di Supabase Storage
 	storagePath := filename
 	if folder != "" && folder != "/" {
-		storagePath = fmt.Sprintf("%s/%s", strings.Trim(folder, "/"), filename)
+		folder = strings.Trim(folder, "/")
+		storagePath = fmt.Sprintf("%s/%s", folder, filename)
 	}
 
-	// Upload ke Supabase Storage menggunakan bytes reader
+	fmt.Printf("📤 Uploading to: %s/%s (Size: %d bytes)\n", s.bucket, storagePath, len(fileBytes))
+
+	// Upload ke Supabase Storage
 	_, err = s.client.UploadFile(s.bucket, storagePath, bytes.NewReader(fileBytes))
 	if err != nil {
-		return "", fmt.Errorf("gagal upload ke Supabase: %v", err)
+		// Coba upload dengan HTTP langsung
+		return s.uploadViaHTTP(fileBytes, storagePath, file.Header.Get("Content-Type"))
 	}
 
 	// Generate public URL
 	publicURL := s.GetPublicURL(storagePath)
+	fmt.Printf("✅ Upload successful: %s\n", publicURL)
 
-	fmt.Printf("✅ File uploaded successfully: %s\n", publicURL)
 	return publicURL, nil
 }
 
-// DeleteFile menghapus file dari Supabase Storage
-func (s *SupabaseUploadService) DeleteFile(fileURL string) error {
-	// Extract path dari URL
-	// URL format: https://yiujndqqbacipqozosdm.supabase.co/storage/v1/object/public/bucket/path/to/file.jpg
+// uploadViaHTTP alternatif upload method
+func (s *SupabaseUploadService) uploadViaHTTP(data []byte, path, contentType string) (string, error) {
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
 
+	url := fmt.Sprintf("%s/storage/v1/object/%s/%s", s.supabaseURL, s.bucket, path)
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(data))
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Content-Type", contentType)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("upload failed: %s - %s", resp.Status, string(body))
+	}
+
+	return s.GetPublicURL(path), nil
+}
+
+func (s *SupabaseUploadService) DeleteFile(fileURL string) error {
 	filePath := s.extractFilePathFromURL(fileURL)
 	if filePath == "" {
 		return fmt.Errorf("invalid file URL: %s", fileURL)
@@ -141,25 +136,18 @@ func (s *SupabaseUploadService) DeleteFile(fileURL string) error {
 		return fmt.Errorf("gagal menghapus file dari Supabase: %v", err)
 	}
 
-	fmt.Printf("✅ File deleted successfully: %s\n", filePath)
+	fmt.Printf("🗑️ File deleted: %s\n", filePath)
 	return nil
 }
 
-// extractFilePathFromURL mengekstrak path dari public URL
 func (s *SupabaseUploadService) extractFilePathFromURL(fileURL string) string {
-	// Format: https://projectid.supabase.co/storage/v1/object/public/bucket/path/to/file
-
-	// Cari "/storage/v1/object/public/"
 	prefix := "/storage/v1/object/public/"
 	idx := strings.Index(fileURL, prefix)
 	if idx == -1 {
 		return ""
 	}
 
-	// Ambil setelah prefix
 	pathWithBucket := fileURL[idx+len(prefix):]
-
-	// Buang bucket name di awal
 	parts := strings.SplitN(pathWithBucket, "/", 2)
 	if len(parts) < 2 {
 		return ""
@@ -168,15 +156,8 @@ func (s *SupabaseUploadService) extractFilePathFromURL(fileURL string) string {
 	return parts[1]
 }
 
-// GetPublicURL menggenerate/construct URL public untuk file
 func (s *SupabaseUploadService) GetPublicURL(filePath string) string {
-	if s.projectID == "" {
-		return "" // Return empty jika project ID tidak bisa di-extract
-	}
-
-	// Remove leading slashes
 	filePath = strings.TrimPrefix(filePath, "/")
-
 	return fmt.Sprintf("https://%s.supabase.co/storage/v1/object/public/%s/%s",
 		s.projectID,
 		s.bucket,
@@ -184,135 +165,83 @@ func (s *SupabaseUploadService) GetPublicURL(filePath string) string {
 	)
 }
 
-// UploadBytes upload dari bytes array
-// Berguna untuk image compression, base64, dll
 func (s *SupabaseUploadService) UploadBytes(data []byte, filename, folder string) (string, error) {
 	if len(data) == 0 {
 		return "", errors.New("data kosong")
 	}
 
-	// Generate unique filename
 	ext := filepath.Ext(filename)
 	if ext == "" {
-		ext = ".jpg" // default extension
+		ext = ".jpg"
 	}
 	uniqueName := fmt.Sprintf("%s%s", uuid.New().String(), ext)
 
 	storagePath := uniqueName
 	if folder != "" && folder != "/" {
-		storagePath = fmt.Sprintf("%s/%s", strings.Trim(folder, "/"), uniqueName)
+		folder = strings.Trim(folder, "/")
+		storagePath = fmt.Sprintf("%s/%s", folder, uniqueName)
 	}
 
-	// Upload ke Supabase
 	_, err := s.client.UploadFile(s.bucket, storagePath, bytes.NewReader(data))
 	if err != nil {
-		return "", fmt.Errorf("gagal upload bytes ke Supabase: %v", err)
+		return "", err
 	}
 
-	publicURL := s.GetPublicURL(storagePath)
-	return publicURL, nil
+	return s.GetPublicURL(storagePath), nil
 }
 
-// FileExists mengecek apakah file sudah ada di storage
-func (s *SupabaseUploadService) FileExists(filePath string) (bool, error) {
-	// Gunakan list files untuk check existence
-	// Ini adalah workaround karena storage-go SDK terbatas
-	files, err := s.client.ListFiles(s.bucket, "", storage.FileSearchOptions{})
-	if err != nil {
-		return false, err
-	}
-
-	for _, file := range files {
-		if file.Name == filePath {
-			return true, nil
-		}
-	}
-
-	return false, nil
+// UploadServiceWrapper interface
+type UploadServiceWrapper interface {
+	UploadFile(file *multipart.FileHeader, folder string) (string, error)
+	DeleteFile(fileURL string) error
 }
 
-// ListFiles menampilkan semua files di folder tertentu
-func (s *SupabaseUploadService) ListFiles(folder string) ([]map[string]interface{}, error) {
-	files, err := s.client.ListFiles(s.bucket, folder, storage.FileSearchOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("gagal list files: %v", err)
-	}
-
-	var result []map[string]interface{}
-
-	folder = strings.Trim(folder, "/")
-
-	for _, file := range files {
-		// Filter by folder jika diperlukan
-		if folder != "" {
-			if !strings.HasPrefix(file.Name, folder+"/") {
-				continue
-			}
-		}
-
-		result = append(result, map[string]interface{}{
-			"name":       file.Name,
-			"id":         file.Id,
-			"updated_at": file.UpdatedAt,
-			"created_at": file.CreatedAt,
-			"url":        s.GetPublicURL(file.Name),
-		})
-	}
-
-	return result, nil
+// SupabaseUploadWrapper
+type SupabaseUploadWrapper struct {
+	service *SupabaseUploadService
 }
 
-// ===== BACKWARD COMPATIBILITY =====
-// Fungsi-fungsi ini untuk kompatibilitas dengan kode lama
-
-type UploadService = SupabaseUploadService
-
-func NewUploadService(supabaseURL, supabaseKey, bucket string) *SupabaseUploadService {
-	return NewSupabaseUploadService(supabaseURL, supabaseKey, bucket)
+func NewSupabaseUploadWrapper(service *SupabaseUploadService) *SupabaseUploadWrapper {
+	return &SupabaseUploadWrapper{service: service}
 }
 
-// ===== LOCAL FILE SYSTEM UPLOAD =====
-// Untuk fallback jika Supabase tidak available
+func (s *SupabaseUploadWrapper) UploadFile(file *multipart.FileHeader, folder string) (string, error) {
+	return s.service.UploadFile(file, folder)
+}
 
+func (s *SupabaseUploadWrapper) DeleteFile(fileURL string) error {
+	return s.service.DeleteFile(fileURL)
+}
+
+// LocalUploadService
 type LocalUploadService struct {
 	uploadPath string
 }
 
 func NewLocalUploadService(uploadPath string) *LocalUploadService {
-	// Buat folder jika belum ada
 	if err := os.MkdirAll(uploadPath, 0755); err != nil {
 		fmt.Printf("⚠️ Warning: gagal membuat folder upload: %v\n", err)
 	}
-	return &LocalUploadService{
-		uploadPath: uploadPath,
-	}
+	return &LocalUploadService{uploadPath: uploadPath}
 }
 
-// UploadFile simpan file ke local folder
 func (s *LocalUploadService) UploadFile(file *multipart.FileHeader, folder string) (string, error) {
 	if file == nil {
 		return "", errors.New("file tidak ditemukan")
 	}
 
-	// Generate unique filename
 	ext := filepath.Ext(file.Filename)
 	filename := fmt.Sprintf("%s%s", uuid.New().String(), ext)
 
-	// Path folder
 	uploadDir := s.uploadPath
 	if folder != "" {
 		uploadDir = filepath.Join(s.uploadPath, folder)
 		if err := os.MkdirAll(uploadDir, 0755); err != nil {
-			return "", fmt.Errorf("gagal membuat folder: %v", err)
+			return "", err
 		}
 	}
 
 	filePath := filepath.Join(uploadDir, filename)
-
-	// Simpan file
-	if err := os.Mkdir(uploadDir, 0755); err != nil && !os.IsExist(err) {
-		return "", err
-	}
 
 	src, err := file.Open()
 	if err != nil {
@@ -330,22 +259,30 @@ func (s *LocalUploadService) UploadFile(file *multipart.FileHeader, folder strin
 		return "", err
 	}
 
-	// Return relative path untuk serve via static
 	if folder != "" {
 		return fmt.Sprintf("/uploads/%s/%s", folder, filename), nil
 	}
 	return fmt.Sprintf("/uploads/%s", filename), nil
 }
 
-// DeleteFile hapus file dari local storage
 func (s *LocalUploadService) DeleteFile(filePath string) error {
-	// filePath format: /uploads/folder/filename
-	// Convert to actual file path
 	actualPath := filepath.Join(s.uploadPath, strings.TrimPrefix(filePath, "/uploads/"))
+	return os.Remove(actualPath)
+}
 
-	if err := os.Remove(actualPath); err != nil {
-		return fmt.Errorf("gagal menghapus file: %v", err)
-	}
+// LocalUploadWrapper
+type LocalUploadWrapper struct {
+	service *LocalUploadService
+}
 
-	return nil
+func NewLocalUploadWrapper(service *LocalUploadService) *LocalUploadWrapper {
+	return &LocalUploadWrapper{service: service}
+}
+
+func (l *LocalUploadWrapper) UploadFile(file *multipart.FileHeader, folder string) (string, error) {
+	return l.service.UploadFile(file, folder)
+}
+
+func (l *LocalUploadWrapper) DeleteFile(fileURL string) error {
+	return l.service.DeleteFile(fileURL)
 }

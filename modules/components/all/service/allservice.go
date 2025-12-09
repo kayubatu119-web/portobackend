@@ -18,15 +18,103 @@ import (
 )
 
 // ============================
+// UPLOAD SERVICE WRAPPER INTERFACE
+// ============================
+
+type UploadServiceWrapper interface {
+	UploadFile(file *multipart.FileHeader, folder string) (string, error)
+	DeleteFile(fileURL string) error
+	ValidateFile(file *multipart.FileHeader, maxSizeMB int64, allowedExts []string) error
+}
+
+// SupabaseUploadWrapper
+type SupabaseUploadWrapper struct {
+	service *utils.SupabaseUploadService
+}
+
+func NewSupabaseUploadWrapper(service *utils.SupabaseUploadService) *SupabaseUploadWrapper {
+	return &SupabaseUploadWrapper{service: service}
+}
+
+func (s *SupabaseUploadWrapper) UploadFile(file *multipart.FileHeader, folder string) (string, error) {
+	return s.service.UploadFile(file, folder)
+}
+
+func (s *SupabaseUploadWrapper) DeleteFile(fileURL string) error {
+	return s.service.DeleteFile(fileURL)
+}
+
+func (s *SupabaseUploadWrapper) ValidateFile(file *multipart.FileHeader, maxSizeMB int64, allowedExts []string) error {
+	if file == nil {
+		return errors.New("file tidak ditemukan")
+	}
+
+	// Ukuran file
+	maxSize := maxSizeMB * 1024 * 1024
+	if file.Size > maxSize {
+		return fmt.Errorf("ukuran file maksimal %dMB", maxSizeMB)
+	}
+
+	// Extension
+	ext := strings.ToLower(filepath.Ext(file.Filename))
+	for _, allowed := range allowedExts {
+		if ext == allowed {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("tipe file tidak diizinkan. File yang diizinkan: %s", strings.Join(allowedExts, ", "))
+}
+
+// LocalUploadWrapper
+type LocalUploadWrapper struct {
+	service *utils.LocalUploadService
+}
+
+func NewLocalUploadWrapper(service *utils.LocalUploadService) *LocalUploadWrapper {
+	return &LocalUploadWrapper{service: service}
+}
+
+func (l *LocalUploadWrapper) UploadFile(file *multipart.FileHeader, folder string) (string, error) {
+	return l.service.UploadFile(file, folder)
+}
+
+func (l *LocalUploadWrapper) DeleteFile(fileURL string) error {
+	return l.service.DeleteFile(fileURL)
+}
+
+func (l *LocalUploadWrapper) ValidateFile(file *multipart.FileHeader, maxSizeMB int64, allowedExts []string) error {
+	if file == nil {
+		return nil
+	}
+
+	// Simple validation untuk local
+	maxSize := maxSizeMB * 1024 * 1024
+	if file.Size > maxSize {
+		return fmt.Errorf("ukuran file maksimal %dMB", maxSizeMB)
+	}
+
+	return nil
+}
+
+// Helper untuk menentukan upload provider
+func getUploadProvider() string {
+	if os.Getenv("UPLOAD_PROVIDER") == "supabase" || os.Getenv("GIN_MODE") == "release" {
+		return "supabase"
+	}
+	return "local"
+}
+
+// ============================
 // SKILLS SERVICE
 // ============================
 
 type SkillService interface {
 	Create(ctx *gin.Context) (*model.SkillResponse, error)
-	CreateWithIcon(ctx *gin.Context) (*model.SkillResponse, error) // Tambah method baru
+	CreateWithIcon(ctx *gin.Context) (*model.SkillResponse, error)
 	GetByID(ctx *gin.Context) (*model.SkillResponse, error)
 	Update(ctx *gin.Context) (*model.SkillResponse, error)
-	UpdateWithIcon(ctx *gin.Context) (*model.SkillResponse, error) // Tambah method baru
+	UpdateWithIcon(ctx *gin.Context) (*model.SkillResponse, error)
 	Delete(ctx *gin.Context) error
 	GetAll(ctx *gin.Context) ([]model.SkillResponse, error)
 	GetFeatured(ctx *gin.Context) ([]model.SkillResponse, error)
@@ -36,59 +124,82 @@ type SkillService interface {
 type skillService struct {
 	repo          repo.SkillRepository
 	uploadPath    string
-	uploadService UploadServiceWrapper // New: untuk abstraksi upload
+	uploadService UploadServiceWrapper
 }
 
+// NewSkillService untuk local storage
 func NewSkillService(repo repo.SkillRepository, uploadPath string) SkillService {
-	// Buat folder upload jika belum ada (fallback)
 	if err := os.MkdirAll(uploadPath, 0755); err != nil {
-		fmt.Printf("Warning: gagal membuat folder upload skill: %v\n", err)
+		fmt.Printf("⚠️ Warning: gagal membuat folder upload skill: %v\n", err)
 	}
-	return &skillService{
-		repo:       repo,
-		uploadPath: uploadPath,
-		uploadService: NewLocalUploadWrapper(
-			utils.NewLocalUploadService(uploadPath),
-		),
-	}
-}
 
-// NewSkillServiceWithSupabase membuat skill service dengan Supabase upload
-func NewSkillServiceWithSupabase(repo repo.SkillRepository, uploadService *utils.SupabaseUploadService) SkillService {
+	var uploadService UploadServiceWrapper
+
+	if getUploadProvider() == "supabase" {
+		supabaseService := createSupabaseUploadService()
+		if supabaseService != nil {
+			uploadService = NewSupabaseUploadWrapper(supabaseService)
+			fmt.Println("✅ Using Supabase Storage for skills")
+		} else {
+			localService := utils.NewLocalUploadService(uploadPath)
+			uploadService = NewLocalUploadWrapper(localService)
+			fmt.Println("⚠️ Using Local Storage for skills (Supabase not configured)")
+		}
+	} else {
+		localService := utils.NewLocalUploadService(uploadPath)
+		uploadService = NewLocalUploadWrapper(localService)
+		fmt.Println("ℹ️ Using Local Storage for skills (development)")
+	}
+
 	return &skillService{
 		repo:          repo,
-		uploadPath:    "", // Tidak perlu untuk Supabase
-		uploadService: NewSupabaseUploadWrapper(uploadService),
+		uploadPath:    uploadPath,
+		uploadService: uploadService,
 	}
 }
 
-// SetUploadService mengatur upload service (untuk switching antara local/supabase)
-func (s *skillService) SetUploadService(uploadService UploadServiceWrapper) {
-	s.uploadService = uploadService
+// NewSkillServiceWithUpload untuk custom upload service
+func NewSkillServiceWithUpload(repo repo.SkillRepository, uploadService UploadServiceWrapper, folder string) SkillService {
+	uploadPath := getUploadPath()
+	localPath := filepath.Join(uploadPath, folder)
+	if err := os.MkdirAll(localPath, 0755); err != nil {
+		fmt.Printf("⚠️ Warning: gagal membuat folder upload: %v\n", err)
+	}
+
+	return &skillService{
+		repo:          repo,
+		uploadPath:    localPath,
+		uploadService: uploadService,
+	}
 }
 
-func (s *skillService) validateFile(file *multipart.FileHeader) error {
-	// Ukuran file 5MB (untuk icon biasanya lebih kecil)
-	maxSize := int64(5 * 1024 * 1024)
-	if file.Size > maxSize {
-		return errors.New("ukuran file maksimal 5MB")
+// Helper functions
+func createSupabaseUploadService() *utils.SupabaseUploadService {
+	supabaseURL := os.Getenv("SUPABASE_URL")
+	supabaseKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
+	if supabaseKey == "" {
+		supabaseKey = os.Getenv("SUPABASE_ANON_KEY")
+	}
+	bucket := os.Getenv("SUPABASE_STORAGE_BUCKET")
+	if bucket == "" {
+		bucket = "uploads"
 	}
 
-	allowedExts := map[string]bool{
-		".jpg":  true,
-		".jpeg": true,
-		".png":  true,
-		".webp": true,
-		".svg":  true, // SVG bagus untuk icon
-		".ico":  true,
+	if supabaseURL == "" || supabaseKey == "" {
+		return nil
 	}
 
-	ext := strings.ToLower(filepath.Ext(file.Filename))
-	if !allowedExts[ext] {
-		return errors.New("tipe file tidak diizinkan. File yang diizinkan: jpg, jpeg, png, webp, svg, ico")
-	}
+	return utils.NewSupabaseUploadService(supabaseURL, supabaseKey, bucket)
+}
 
-	return nil
+func getUploadPath() string {
+	if os.Getenv("GIN_MODE") == "release" {
+		if path := os.Getenv("UPLOAD_PATH"); path != "" {
+			return path
+		}
+		return "/tmp/uploads"
+	}
+	return "./uploads"
 }
 
 func (s *skillService) Create(ctx *gin.Context) (*model.SkillResponse, error) {
@@ -139,12 +250,13 @@ func (s *skillService) CreateWithIcon(ctx *gin.Context) (*model.SkillResponse, e
 	iconURL := ""
 	if file != nil {
 		// Validasi file
-		if err := s.uploadService.ValidateFile(file, 5, []string{".jpg", ".jpeg", ".png", ".webp", ".svg", ".ico"}); err != nil {
+		allowedExts := []string{".jpg", ".jpeg", ".png", ".webp", ".svg", ".ico"}
+		if err := s.uploadService.ValidateFile(file, 5, allowedExts); err != nil {
 			return nil, err
 		}
 
 		// Upload ke Supabase atau Local storage
-		iconURL, err = s.uploadService.UploadFile(file, "uploads_skills")
+		iconURL, err = s.uploadService.UploadFile(file, "skills")
 		if err != nil {
 			return nil, fmt.Errorf("gagal upload file icon: %v", err)
 		}
@@ -255,12 +367,13 @@ func (s *skillService) UpdateWithIcon(ctx *gin.Context) (*model.SkillResponse, e
 	// Jika ada file baru diupload
 	if file != nil {
 		// Validasi file
-		if err := s.uploadService.ValidateFile(file, 5, []string{".jpg", ".jpeg", ".png", ".webp", ".svg", ".ico"}); err != nil {
+		allowedExts := []string{".jpg", ".jpeg", ".png", ".webp", ".svg", ".ico"}
+		if err := s.uploadService.ValidateFile(file, 5, allowedExts); err != nil {
 			return nil, err
 		}
 
 		// Upload file baru
-		newIconURL, err := s.uploadService.UploadFile(file, "uploads_skills")
+		newIconURL, err := s.uploadService.UploadFile(file, "skills")
 		if err != nil {
 			return nil, fmt.Errorf("gagal upload file icon: %v", err)
 		}
@@ -398,50 +511,50 @@ type certificateService struct {
 	uploadService UploadServiceWrapper
 }
 
+// NewCertificateService untuk local storage
 func NewCertificateService(repo repo.CertificateRepository, uploadPath string) CertificateService {
-	// Buat folder upload jika belum ada
 	if err := os.MkdirAll(uploadPath, 0755); err != nil {
-		fmt.Printf("Warning: gagal membuat folder upload certificate: %v\n", err)
+		fmt.Printf("⚠️ Warning: gagal membuat folder upload certificate: %v\n", err)
 	}
-	return &certificateService{
-		repo:       repo,
-		uploadPath: uploadPath,
-		uploadService: NewLocalUploadWrapper(
-			utils.NewLocalUploadService(uploadPath),
-		),
-	}
-}
 
-// NewCertificateServiceWithSupabase membuat certificate service dengan Supabase upload
-func NewCertificateServiceWithSupabase(repo repo.CertificateRepository, uploadService *utils.SupabaseUploadService) CertificateService {
+	var uploadService UploadServiceWrapper
+
+	if getUploadProvider() == "supabase" {
+		supabaseService := createSupabaseUploadService()
+		if supabaseService != nil {
+			uploadService = NewSupabaseUploadWrapper(supabaseService)
+			fmt.Println("✅ Using Supabase Storage for certificates")
+		} else {
+			localService := utils.NewLocalUploadService(uploadPath)
+			uploadService = NewLocalUploadWrapper(localService)
+			fmt.Println("⚠️ Using Local Storage for certificates (Supabase not configured)")
+		}
+	} else {
+		localService := utils.NewLocalUploadService(uploadPath)
+		uploadService = NewLocalUploadWrapper(localService)
+		fmt.Println("ℹ️ Using Local Storage for certificates (development)")
+	}
+
 	return &certificateService{
 		repo:          repo,
-		uploadPath:    "",
-		uploadService: NewSupabaseUploadWrapper(uploadService),
+		uploadPath:    uploadPath,
+		uploadService: uploadService,
 	}
 }
 
-func (s *certificateService) validateFile(file *multipart.FileHeader) error {
-	// Ukuran file 10MB
-	maxSize := int64(10 * 1024 * 1024)
-	if file.Size > maxSize {
-		return errors.New("ukuran file maksimal 10MB")
+// NewCertificateServiceWithUpload untuk custom upload service
+func NewCertificateServiceWithUpload(repo repo.CertificateRepository, uploadService UploadServiceWrapper, folder string) CertificateService {
+	uploadPath := getUploadPath()
+	localPath := filepath.Join(uploadPath, folder)
+	if err := os.MkdirAll(localPath, 0755); err != nil {
+		fmt.Printf("⚠️ Warning: gagal membuat folder upload: %v\n", err)
 	}
 
-	allowedExts := map[string]bool{
-		".jpg":  true,
-		".jpeg": true,
-		".png":  true,
-		".webp": true,
-		".pdf":  true, // Untuk certificate mungkin butuh PDF juga
+	return &certificateService{
+		repo:          repo,
+		uploadPath:    localPath,
+		uploadService: uploadService,
 	}
-
-	ext := strings.ToLower(filepath.Ext(file.Filename))
-	if !allowedExts[ext] {
-		return errors.New("tipe file tidak diizinkan. File yang diizinkan: jpg, jpeg, png, webp, pdf")
-	}
-
-	return nil
 }
 
 func (s *certificateService) Create(ctx *gin.Context) (*model.CertificateResponse, error) {
@@ -486,12 +599,13 @@ func (s *certificateService) CreateWithImage(ctx *gin.Context) (*model.Certifica
 	}
 
 	// Validasi file
-	if err := s.uploadService.ValidateFile(file, 10, []string{".jpg", ".jpeg", ".png", ".webp", ".pdf"}); err != nil {
+	allowedExts := []string{".jpg", ".jpeg", ".png", ".webp", ".pdf"}
+	if err := s.uploadService.ValidateFile(file, 10, allowedExts); err != nil {
 		return nil, err
 	}
 
 	// Upload ke Supabase atau Local storage
-	imageURL, err := s.uploadService.UploadFile(file, "uploads_certificates")
+	imageURL, err := s.uploadService.UploadFile(file, "certificates")
 	if err != nil {
 		return nil, fmt.Errorf("gagal upload file: %v", err)
 	}
@@ -537,7 +651,6 @@ func (s *certificateService) CreateWithImage(ctx *gin.Context) (*model.Certifica
 	return s.convertCertToResponse(cert), nil
 }
 
-// Method lainnya tetap sama...
 func (s *certificateService) GetByID(ctx *gin.Context) (*model.CertificateResponse, error) {
 	idStr := ctx.Param("id")
 	id, err := uuid.Parse(idStr)
@@ -654,7 +767,7 @@ func (s *certificateService) convertCertToResponse(cert *model.Certificate) *mod
 }
 
 // ============================
-// EDUCATION SERVICE
+// EDUCATION SERVICE (no upload needed)
 // ============================
 
 type EducationService interface {
@@ -785,7 +898,7 @@ func (s *educationService) GetAllWithAchievements(ctx *gin.Context) ([]model.Edu
 }
 
 // ============================
-// TESTIMONIALS SERVICE
+// TESTIMONIALS SERVICE (no upload needed)
 // ============================
 
 type TestimonialService interface {
@@ -943,7 +1056,7 @@ func (s *testimonialService) GetByStatus(ctx *gin.Context) ([]model.TestimonialR
 }
 
 // ============================
-// BLOG SERVICE
+// BLOG SERVICE (no upload needed)
 // ============================
 
 type BlogService interface {
@@ -1128,35 +1241,196 @@ func (s *blogService) GetAllTags(ctx *gin.Context) ([]model.TagResponse, error) 
 }
 
 // ============================
-// HELPER FUNCTIONS
+// SECTIONS SERVICE (no upload needed)
 // ============================
 
-func convertSkillToResponse(skill *model.Skill) *model.SkillResponse {
-	return &model.SkillResponse{
-		ID:           skill.ID,
-		Name:         skill.Name,
-		Value:        skill.Value,
-		IconURL:      skill.IconURL,
-		Category:     skill.Category,
-		DisplayOrder: skill.DisplayOrder,
-		IsFeatured:   skill.IsFeatured,
-		CreatedAt:    skill.CreatedAt,
-		UpdatedAt:    skill.UpdatedAt,
-	}
+type SectionService interface {
+	Create(ctx *gin.Context) (*model.SectionResponse, error)
+	Delete(ctx *gin.Context) error
+	GetAll(ctx *gin.Context) ([]model.SectionResponse, error)
 }
 
-func convertCertToResponse(cert *model.Certificate) *model.CertificateResponse {
-	return &model.CertificateResponse{
-		ID:            cert.ID,
-		Name:          cert.Name,
-		ImageURL:      cert.ImageURL,
-		IssueDate:     cert.IssueDate,
-		Issuer:        cert.Issuer,
-		CredentialURL: cert.CredentialURL,
-		DisplayOrder:  cert.DisplayOrder,
-		CreatedAt:     cert.CreatedAt,
-	}
+type sectionService struct {
+	repo repo.SectionRepository
 }
+
+func NewSectionService(repo repo.SectionRepository) SectionService {
+	return &sectionService{repo: repo}
+}
+
+func (s *sectionService) Create(ctx *gin.Context) (*model.SectionResponse, error) {
+	var req model.SectionRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		return nil, err
+	}
+
+	section := &model.Section{
+		SectionID:    req.SectionID,
+		Label:        req.Label,
+		DisplayOrder: req.DisplayOrder,
+		IsActive:     req.IsActive,
+	}
+
+	if err := s.repo.Create(section); err != nil {
+		return nil, err
+	}
+
+	return convertSectionToResponse(section), nil
+}
+
+func (s *sectionService) Delete(ctx *gin.Context) error {
+	id, err := uuid.Parse(ctx.Param("id"))
+	if err != nil {
+		return errors.New("invalid section ID")
+	}
+
+	return s.repo.Delete(id)
+}
+
+func (s *sectionService) GetAll(ctx *gin.Context) ([]model.SectionResponse, error) {
+	sections, err := s.repo.GetAll()
+	if err != nil {
+		return nil, err
+	}
+
+	var responses []model.SectionResponse
+	for _, section := range sections {
+		responses = append(responses, *convertSectionToResponse(&section))
+	}
+
+	return responses, nil
+}
+
+// ============================
+// SOCIAL LINKS SERVICE (no upload needed)
+// ============================
+
+type SocialLinkService interface {
+	Create(ctx *gin.Context) (*model.SocialLinkResponse, error)
+	Delete(ctx *gin.Context) error
+	GetAll(ctx *gin.Context) ([]model.SocialLinkResponse, error)
+}
+
+type socialLinkService struct {
+	repo repo.SocialLinkRepository
+}
+
+func NewSocialLinkService(repo repo.SocialLinkRepository) SocialLinkService {
+	return &socialLinkService{repo: repo}
+}
+
+func (s *socialLinkService) Create(ctx *gin.Context) (*model.SocialLinkResponse, error) {
+	var req model.SocialLinkRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		return nil, err
+	}
+
+	link := &model.SocialLink{
+		Platform:     req.Platform,
+		URL:          req.URL,
+		IconName:     req.IconName,
+		DisplayOrder: req.DisplayOrder,
+		IsActive:     req.IsActive,
+	}
+
+	if err := s.repo.Create(link); err != nil {
+		return nil, err
+	}
+
+	return convertSocialLinkToResponse(link), nil
+}
+
+func (s *socialLinkService) Delete(ctx *gin.Context) error {
+	id, err := uuid.Parse(ctx.Param("id"))
+	if err != nil {
+		return errors.New("invalid social link ID")
+	}
+
+	return s.repo.Delete(id)
+}
+
+func (s *socialLinkService) GetAll(ctx *gin.Context) ([]model.SocialLinkResponse, error) {
+	links, err := s.repo.GetAll()
+	if err != nil {
+		return nil, err
+	}
+
+	var responses []model.SocialLinkResponse
+	for _, link := range links {
+		responses = append(responses, *convertSocialLinkToResponse(&link))
+	}
+
+	return responses, nil
+}
+
+// ============================
+// SETTINGS SERVICE (no upload needed)
+// ============================
+
+type SettingService interface {
+	Create(ctx *gin.Context) (*model.SettingResponse, error)
+	Delete(ctx *gin.Context) error
+	GetAll(ctx *gin.Context) ([]model.SettingResponse, error)
+}
+
+type settingService struct {
+	repo repo.SettingRepository
+}
+
+func NewSettingService(repo repo.SettingRepository) SettingService {
+	return &settingService{repo: repo}
+}
+
+func (s *settingService) Create(ctx *gin.Context) (*model.SettingResponse, error) {
+	var req model.SettingRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		return nil, err
+	}
+
+	setting := &model.Setting{
+		Key:         req.Key,
+		Value:       req.Value,
+		DataType:    req.DataType,
+		Description: req.Description,
+	}
+
+	if setting.DataType == "" {
+		setting.DataType = "string"
+	}
+
+	if err := s.repo.Create(setting); err != nil {
+		return nil, err
+	}
+
+	return convertSettingToResponse(setting), nil
+}
+
+func (s *settingService) Delete(ctx *gin.Context) error {
+	id, err := uuid.Parse(ctx.Param("id"))
+	if err != nil {
+		return errors.New("invalid setting ID")
+	}
+
+	return s.repo.Delete(id)
+}
+
+func (s *settingService) GetAll(ctx *gin.Context) ([]model.SettingResponse, error) {
+	settings, err := s.repo.GetAll()
+	if err != nil {
+		return nil, err
+	}
+
+	var responses []model.SettingResponse
+	for _, setting := range settings {
+		responses = append(responses, *convertSettingToResponse(&setting))
+	}
+
+	return responses, nil
+}
+
+// ============================
+// HELPER FUNCTIONS
+// ============================
 
 func convertEducationToResponse(edu *model.Education) *model.EducationResponse {
 	var achievements []model.AchievementResponse
@@ -1225,198 +1499,6 @@ func convertBlogToResponse(post *model.BlogPost) *model.BlogPostResponse {
 		UpdatedAt:     post.UpdatedAt,
 	}
 }
-
-// ============================
-// SECTIONS SERVICE
-// ============================
-
-type SectionService interface {
-	Create(ctx *gin.Context) (*model.SectionResponse, error)
-	Delete(ctx *gin.Context) error
-	GetAll(ctx *gin.Context) ([]model.SectionResponse, error)
-}
-
-type sectionService struct {
-	repo repo.SectionRepository
-}
-
-func NewSectionService(repo repo.SectionRepository) SectionService {
-	return &sectionService{repo: repo}
-}
-
-func (s *sectionService) Create(ctx *gin.Context) (*model.SectionResponse, error) {
-	var req model.SectionRequest
-	if err := ctx.ShouldBindJSON(&req); err != nil {
-		return nil, err
-	}
-
-	section := &model.Section{
-		SectionID:    req.SectionID,
-		Label:        req.Label,
-		DisplayOrder: req.DisplayOrder,
-		IsActive:     req.IsActive,
-	}
-
-	if err := s.repo.Create(section); err != nil {
-		return nil, err
-	}
-
-	return convertSectionToResponse(section), nil
-}
-
-func (s *sectionService) Delete(ctx *gin.Context) error {
-	id, err := uuid.Parse(ctx.Param("id"))
-	if err != nil {
-		return errors.New("invalid section ID")
-	}
-
-	return s.repo.Delete(id)
-}
-
-func (s *sectionService) GetAll(ctx *gin.Context) ([]model.SectionResponse, error) {
-	sections, err := s.repo.GetAll()
-	if err != nil {
-		return nil, err
-	}
-
-	var responses []model.SectionResponse
-	for _, section := range sections {
-		responses = append(responses, *convertSectionToResponse(&section))
-	}
-
-	return responses, nil
-}
-
-// ============================
-// SOCIAL LINKS SERVICE
-// ============================
-
-type SocialLinkService interface {
-	Create(ctx *gin.Context) (*model.SocialLinkResponse, error)
-	Delete(ctx *gin.Context) error
-	GetAll(ctx *gin.Context) ([]model.SocialLinkResponse, error)
-}
-
-type socialLinkService struct {
-	repo repo.SocialLinkRepository
-}
-
-func NewSocialLinkService(repo repo.SocialLinkRepository) SocialLinkService {
-	return &socialLinkService{repo: repo}
-}
-
-func (s *socialLinkService) Create(ctx *gin.Context) (*model.SocialLinkResponse, error) {
-	var req model.SocialLinkRequest
-	if err := ctx.ShouldBindJSON(&req); err != nil {
-		return nil, err
-	}
-
-	link := &model.SocialLink{
-		Platform:     req.Platform,
-		URL:          req.URL,
-		IconName:     req.IconName,
-		DisplayOrder: req.DisplayOrder,
-		IsActive:     req.IsActive,
-	}
-
-	if err := s.repo.Create(link); err != nil {
-		return nil, err
-	}
-
-	return convertSocialLinkToResponse(link), nil
-}
-
-func (s *socialLinkService) Delete(ctx *gin.Context) error {
-	id, err := uuid.Parse(ctx.Param("id"))
-	if err != nil {
-		return errors.New("invalid social link ID")
-	}
-
-	return s.repo.Delete(id)
-}
-
-func (s *socialLinkService) GetAll(ctx *gin.Context) ([]model.SocialLinkResponse, error) {
-	links, err := s.repo.GetAll()
-	if err != nil {
-		return nil, err
-	}
-
-	var responses []model.SocialLinkResponse
-	for _, link := range links {
-		responses = append(responses, *convertSocialLinkToResponse(&link))
-	}
-
-	return responses, nil
-}
-
-// ============================
-// SETTINGS SERVICE
-// ============================
-
-type SettingService interface {
-	Create(ctx *gin.Context) (*model.SettingResponse, error)
-	Delete(ctx *gin.Context) error
-	GetAll(ctx *gin.Context) ([]model.SettingResponse, error)
-}
-
-type settingService struct {
-	repo repo.SettingRepository
-}
-
-func NewSettingService(repo repo.SettingRepository) SettingService {
-	return &settingService{repo: repo}
-}
-
-func (s *settingService) Create(ctx *gin.Context) (*model.SettingResponse, error) {
-	var req model.SettingRequest
-	if err := ctx.ShouldBindJSON(&req); err != nil {
-		return nil, err
-	}
-
-	setting := &model.Setting{
-		Key:         req.Key,
-		Value:       req.Value,
-		DataType:    req.DataType,
-		Description: req.Description,
-	}
-
-	if setting.DataType == "" {
-		setting.DataType = "string"
-	}
-
-	if err := s.repo.Create(setting); err != nil {
-		return nil, err
-	}
-
-	return convertSettingToResponse(setting), nil
-}
-
-func (s *settingService) Delete(ctx *gin.Context) error {
-	id, err := uuid.Parse(ctx.Param("id"))
-	if err != nil {
-		return errors.New("invalid setting ID")
-	}
-
-	return s.repo.Delete(id)
-}
-
-func (s *settingService) GetAll(ctx *gin.Context) ([]model.SettingResponse, error) {
-	settings, err := s.repo.GetAll()
-	if err != nil {
-		return nil, err
-	}
-
-	var responses []model.SettingResponse
-	for _, setting := range settings {
-		responses = append(responses, *convertSettingToResponse(&setting))
-	}
-
-	return responses, nil
-}
-
-// ============================
-// HELPER FUNCTIONS
-// ============================
 
 func convertSectionToResponse(section *model.Section) *model.SectionResponse {
 	return &model.SectionResponse{

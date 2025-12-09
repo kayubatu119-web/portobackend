@@ -32,7 +32,7 @@ func (s *SupabaseUploadWrapper) DeleteFile(fileURL string) error {
 }
 
 func (s *SupabaseUploadWrapper) ValidateFile(file *multipart.FileHeader, maxSizeMB int64, allowedExts []string) error {
-	return s.service.ValidateFile(file, maxSizeMB, allowedExts)
+	return s.ValidateFile(file, maxSizeMB, allowedExts)
 }
 
 // LocalUploadWrapper adalah wrapper untuk Local Upload Service

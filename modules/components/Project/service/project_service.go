@@ -3,6 +3,7 @@ package projectservice
 import (
 	"errors"
 	"fmt"
+
 	. "gintugas/modules/components/Project/model"
 	. "gintugas/modules/components/Project/repository"
 	"gintugas/modules/utils"
@@ -35,26 +36,87 @@ type projectService struct {
 	uploadService UploadServiceWrapper
 }
 
+// NewService untuk development (local storage)
 func NewService(repository Repository, uploadPath string) Service {
 	if err := os.MkdirAll(uploadPath, 0755); err != nil {
 		fmt.Printf("Warning: gagal membuat folder upload: %v\n", err)
 	}
-	return &projectService{
-		repository: repository,
-		uploadPath: uploadPath,
-		uploadService: NewLocalUploadWrapper(
+
+	var uploadService UploadServiceWrapper
+
+	// Cek apakah menggunakan Supabase
+	if shouldUseSupabase() {
+		uploadService = createSupabaseUploadService()
+		if uploadService != nil {
+			fmt.Println("✅ Using Supabase Storage for uploads")
+		} else {
+			uploadService = NewLocalUploadWrapper(
+				utils.NewLocalUploadService(uploadPath),
+			)
+			fmt.Println("⚠️ Using Local Storage (Supabase not configured)")
+		}
+	} else {
+		uploadService = NewLocalUploadWrapper(
 			utils.NewLocalUploadService(uploadPath),
-		),
+		)
+		fmt.Println("ℹ️ Using Local Storage for development")
+	}
+
+	return &projectService{
+		repository:    repository,
+		uploadPath:    uploadPath,
+		uploadService: uploadService,
 	}
 }
 
-// NewServiceWithSupabase membuat project service dengan Supabase upload
-func NewServiceWithSupabase(repository Repository, uploadService *utils.SupabaseUploadService) Service {
+func NewServiceWithUpload(repository Repository, uploadService UploadServiceWrapper, folder string) Service {
+	uploadPath := getUploadPath()
+	localPath := filepath.Join(uploadPath, folder)
+
+	if err := os.MkdirAll(localPath, 0755); err != nil {
+		fmt.Printf("Warning: gagal membuat folder upload: %v\n", err)
+	}
+
 	return &projectService{
 		repository:    repository,
-		uploadPath:    "",
-		uploadService: NewSupabaseUploadWrapper(uploadService),
+		uploadPath:    localPath,
+		uploadService: uploadService,
 	}
+}
+
+func shouldUseSupabase() bool {
+	uploadProvider := os.Getenv("UPLOAD_PROVIDER")
+	return uploadProvider == "supabase" || os.Getenv("GIN_MODE") == "release"
+}
+
+// createSupabaseUploadService membuat service untuk upload ke Supabase
+func createSupabaseUploadService() UploadServiceWrapper {
+	supabaseURL := os.Getenv("SUPABASE_URL")
+	supabaseKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
+	if supabaseKey == "" {
+		supabaseKey = os.Getenv("SUPABASE_ANON_KEY")
+	}
+	bucket := os.Getenv("SUPABASE_STORAGE_BUCKET")
+	if bucket == "" {
+		bucket = "uploads"
+	}
+
+	if supabaseURL == "" || supabaseKey == "" {
+		return nil
+	}
+
+	supabaseService := utils.NewSupabaseUploadService(supabaseURL, supabaseKey, bucket)
+	return NewSupabaseUploadWrapper(supabaseService)
+}
+
+func getUploadPath() string {
+	if os.Getenv("GIN_MODE") == "release" {
+		if path := os.Getenv("UPLOAD_PATH"); path != "" {
+			return path
+		}
+		return "/tmp/uploads"
+	}
+	return "./uploads"
 }
 
 type tagsService struct {
@@ -74,16 +136,19 @@ func (s *projectService) validateFile(file *multipart.FileHeader) error {
 		return errors.New("ukuran file maksimal 10MB")
 	}
 
-	allowedExts := map[string]bool{
-		".jpg":  true,
-		".jpeg": true,
-		".png":  true,
-		".webp": true,
+	allowedExts := []string{".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"}
+	ext := strings.ToLower(filepath.Ext(file.Filename))
+
+	valid := false
+	for _, allowed := range allowedExts {
+		if ext == allowed {
+			valid = true
+			break
+		}
 	}
 
-	ext := strings.ToLower(filepath.Ext(file.Filename))
-	if !allowedExts[ext] {
-		return errors.New("tipe file tidak diizinkan. File yang diizinkan: jpg, jpeg, png, webp")
+	if !valid {
+		return fmt.Errorf("tipe file tidak diizinkan. File yang diizinkan: %s", strings.Join(allowedExts, ", "))
 	}
 
 	return nil
@@ -106,27 +171,12 @@ func (s *projectService) CreateProjekWithImageService(ctx *gin.Context) (Project
 		return Project{}, errors.New("deskripsi projek harus diisi")
 	}
 
-	if form.CodeURL == "" {
-		return Project{}, errors.New("URL kode projek harus diisi")
-	}
-
 	// Handle file upload
 	file, err := ctx.FormFile("image")
 
-	// Tambahkan logging untuk debugging
-	if err != nil {
-		if err == http.ErrMissingFile {
-			fmt.Println("⚠️ Warning: No file uploaded (missing file)")
-		} else {
-			fmt.Printf("❌ Error getting file: %v\n", err)
-			return Project{}, fmt.Errorf("gagal mengambil file: %v", err)
-		}
-	}
-
-	imageURL := "#"
-	if file != nil {
-		fmt.Printf("✅ File received: %s, Size: %d bytes, Content-Type: %s\n",
-			file.Filename, file.Size, file.Header.Get("Content-Type"))
+	imageURL := ""
+	if err == nil && file != nil {
+		fmt.Printf("✅ File received: %s, Size: %d bytes\n", file.Filename, file.Size)
 
 		// Validasi file
 		if err := s.validateFile(file); err != nil {
@@ -134,36 +184,19 @@ func (s *projectService) CreateProjekWithImageService(ctx *gin.Context) (Project
 			return Project{}, err
 		}
 
-		// Generate unique filename
-		ext := filepath.Ext(file.Filename)
-		fileName := fmt.Sprintf("project_%s%s", uuid.New().String(), ext)
-		filePath := filepath.Join(s.uploadPath, fileName)
-
-		fmt.Printf("📁 Saving file to: %s\n", filePath)
-
-		// Pastikan folder upload exists
-		if err := os.MkdirAll(s.uploadPath, 0755); err != nil {
-			return Project{}, fmt.Errorf("gagal membuat folder upload: %v", err)
+		// Upload file ke storage (Supabase atau Local)
+		imageURL, err = s.uploadService.UploadFile(file, "projects")
+		if err != nil {
+			fmt.Printf("❌ Upload failed: %v\n", err)
+			return Project{}, fmt.Errorf("gagal mengupload file: %v", err)
 		}
 
-		// Simpan file
-		if err := ctx.SaveUploadedFile(file, filePath); err != nil {
-			fmt.Printf("❌ Failed to save file: %v\n", err)
-			return Project{}, fmt.Errorf("gagal menyimpan file: %v", err)
-		}
-
-		// Verifikasi file tersimpan
-		if fileInfo, err := os.Stat(filePath); os.IsNotExist(err) {
-			return Project{}, fmt.Errorf("file gagal disimpan: %v", err)
-		} else {
-			fmt.Printf("✅ File saved successfully, size: %d bytes\n", fileInfo.Size())
-		}
-
-		// Set image URL
-		imageURL = "/uploads/projects/" + fileName
-		fmt.Printf("🔗 Image URL set to: %s\n", imageURL)
+		fmt.Printf("🔗 Image uploaded successfully: %s\n", imageURL)
+	} else if err != http.ErrMissingFile {
+		// Error selain "file tidak diupload"
+		fmt.Printf("⚠️ Error getting file: %v\n", err)
 	} else {
-		fmt.Println("ℹ️ No file uploaded, using default image URL")
+		fmt.Println("ℹ️ No file uploaded, will not set image URL")
 	}
 
 	// Set default values
@@ -173,12 +206,15 @@ func (s *projectService) CreateProjekWithImageService(ctx *gin.Context) (Project
 	if form.DemoURL == "" {
 		form.DemoURL = "#"
 	}
+	if form.CodeURL == "" {
+		form.CodeURL = "#"
+	}
 
 	// Convert form to Project entity
 	project := Project{
 		Title:        form.Title,
 		Description:  form.Description,
-		ImageURL:     imageURL,
+		ImageURL:     imageURL, // URL dari Supabase atau local
 		DemoURL:      form.DemoURL,
 		CodeURL:      form.CodeURL,
 		DisplayOrder: form.DisplayOrder,
@@ -188,11 +224,9 @@ func (s *projectService) CreateProjekWithImageService(ctx *gin.Context) (Project
 
 	result, err := s.repository.CreateProjekRepository(project)
 	if err != nil {
-		// Cleanup file jika gagal menyimpan data
-		if file != nil && imageURL != "#" {
-			fileToDelete := filepath.Join(s.uploadPath, filepath.Base(imageURL))
-			os.Remove(fileToDelete)
-			fmt.Printf("🗑️ Cleaned up file: %s\n", fileToDelete)
+		// Cleanup uploaded file jika gagal menyimpan data
+		if imageURL != "" {
+			s.uploadService.DeleteFile(imageURL)
 		}
 		return Project{}, fmt.Errorf("gagal menyimpan data projek: %v", err)
 	}
@@ -252,53 +286,39 @@ func (s *projectService) UpdateProjekService(ctx *gin.Context) (Project, error) 
 		return Project{}, errors.New("projek tidak ditemukan")
 	}
 
-	// Simpan image URL lama
-	oldImageURL := existingProject.ImageURL
-
 	// Handle file upload
 	file, err := ctx.FormFile("image")
-	if err != nil && err != http.ErrMissingFile {
-		return Project{}, fmt.Errorf("gagal mengambil file: %v", err)
-	}
 
 	imageURL := existingProject.ImageURL
-	if file != nil {
-		fmt.Printf("✅ File received for update: %s\n", file.Filename)
+	if err == nil && file != nil {
+		fmt.Printf("✅ New file received for update: %s\n", file.Filename)
 
 		// Validasi file
 		if err := s.validateFile(file); err != nil {
 			return Project{}, err
 		}
 
-		// Generate unique filename
-		ext := filepath.Ext(file.Filename)
-		fileName := fmt.Sprintf("project_%s%s", uuid.New().String(), ext)
-		filePath := filepath.Join(s.uploadPath, fileName)
-
-		// Simpan file baru
-		if err := ctx.SaveUploadedFile(file, filePath); err != nil {
-			return Project{}, fmt.Errorf("gagal menyimpan file: %v", err)
+		// Upload file baru
+		newImageURL, err := s.uploadService.UploadFile(file, "projects")
+		if err != nil {
+			return Project{}, fmt.Errorf("gagal mengupload file baru: %v", err)
 		}
 
-		imageURL = "/uploads/projects/" + fileName
-
-		// Hapus file lama jika bukan default
-		if oldImageURL != "" && oldImageURL != "#" {
-			oldFileName := filepath.Base(oldImageURL)
-			oldFilePath := filepath.Join(s.uploadPath, oldFileName)
-			os.Remove(oldFilePath) // Ignore error
-			fmt.Printf("🗑️ Deleted old file: %s\n", oldFilePath)
+		// Hapus file lama jika ada
+		if existingProject.ImageURL != "" {
+			s.uploadService.DeleteFile(existingProject.ImageURL)
 		}
+
+		imageURL = newImageURL
+		fmt.Printf("🔄 Updated image to: %s\n", imageURL)
 	}
 
 	// Bind form data
 	var form ProjectUpdateForm
 	if err := ctx.ShouldBind(&form); err != nil {
 		// Cleanup file baru jika binding gagal
-		if file != nil {
-			newFileName := filepath.Base(imageURL)
-			newFilePath := filepath.Join(s.uploadPath, newFileName)
-			os.Remove(newFilePath)
+		if file != nil && imageURL != existingProject.ImageURL {
+			s.uploadService.DeleteFile(imageURL)
 		}
 		return Project{}, fmt.Errorf("gagal binding data: %v", err)
 	}
@@ -331,10 +351,8 @@ func (s *projectService) UpdateProjekService(ctx *gin.Context) (Project, error) 
 	result, err := s.repository.UpdateProjekRepository(existingProject)
 	if err != nil {
 		// Cleanup file baru jika update gagal
-		if file != nil {
-			newFileName := filepath.Base(imageURL)
-			newFilePath := filepath.Join(s.uploadPath, newFileName)
-			os.Remove(newFilePath)
+		if file != nil && imageURL != existingProject.ImageURL {
+			s.uploadService.DeleteFile(imageURL)
 		}
 		return Project{}, fmt.Errorf("gagal mengupdate projek: %v", err)
 	}
@@ -349,40 +367,19 @@ func (s *projectService) DeleteProjekService(ctx *gin.Context) error {
 		return errors.New("ID projek tidak valid")
 	}
 
-	// Check if project exists dan ambil datanya
+	// Check if project exists
 	existingProject, err := s.repository.GetProjekRepository(id)
 	if err != nil {
 		return errors.New("projek tidak ditemukan")
 	}
 
-	// Delete dari database terlebih dahulu
-	err = s.repository.DeleteProjekRepository(id)
-	if err != nil {
-		return fmt.Errorf("gagal menghapus projek: %v", err)
+	// Hapus file image jika ada
+	if existingProject.ImageURL != "" {
+		s.uploadService.DeleteFile(existingProject.ImageURL)
 	}
 
-	// Hapus file image jika ada dan bukan default
-	if existingProject.ImageURL != "" && existingProject.ImageURL != "#" {
-		// Extract filename dari URL
-		// ImageURL format: "/uploads/project_xxx.png"
-		fileName := filepath.Base(existingProject.ImageURL)
-		filePath := filepath.Join(s.uploadPath, fileName)
-
-		// Check apakah file exists
-		if _, err := os.Stat(filePath); err == nil {
-			// File exists, hapus
-			if err := os.Remove(filePath); err != nil {
-				// Log error tapi jangan return error karena data sudah terhapus dari DB
-				fmt.Printf("⚠️ Warning: gagal menghapus file %s: %v\n", filePath, err)
-			} else {
-				fmt.Printf("✅ File deleted successfully: %s\n", filePath)
-			}
-		} else {
-			fmt.Printf("ℹ️ File not found, skipping deletion: %s\n", filePath)
-		}
-	}
-
-	return nil
+	// Delete dari database
+	return s.repository.DeleteProjekRepository(id)
 }
 
 func (s *tagsService) CreateTags(ctx *gin.Context) (*TagResponse, error) {
@@ -401,7 +398,6 @@ func (s *tagsService) CreateTags(ctx *gin.Context) (*TagResponse, error) {
 	}
 
 	return s.convertToResponse(Tags), nil
-
 }
 
 func (s *tagsService) convertToResponse(Tags *ProjectTag) *TagResponse {

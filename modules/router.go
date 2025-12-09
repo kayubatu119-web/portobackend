@@ -30,44 +30,58 @@ import (
 func Initiator(router *gin.Engine, db *sql.DB, gormDB *gorm.DB) {
 	router.Use(cors.New(cors.Config{
 		AllowOrigins:     []string{"*"},
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
-		ExposeHeaders:    []string{"Content-Length"},
-		AllowCredentials: false,
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "Accept", "X-Requested-With"},
+		ExposeHeaders:    []string{"Content-Length", "Content-Disposition"},
+		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))
 
 	uploadBasePath := getUploadPath()
 
-	// Create upload directories jika tidak ada (untuk development)
-	if os.Getenv("GIN_MODE") != "release" {
-		createUploadDirs(uploadBasePath)
-	}
+	// ============================
+	// CREATE UPLOAD SERVICES
+	// ============================
+	var supabaseUploadService *utils.SupabaseUploadService
+	var uploadProvider string
 
-	// ============================
-	// SUPABASE STORAGE SETUP
-	// ============================
-	// Opsi 1: Gunakan Supabase Storage (Production recommended)
+	// Setup Supabase Storage jika ada konfigurasi
 	supabaseURL := os.Getenv("SUPABASE_URL")
-	supabaseKey := os.Getenv("SUPABASE_KEY")
-	_ = supabaseURL // Will use if integrated
-	_ = supabaseKey // Will use if integrated
+	supabaseKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
+	if supabaseKey == "" {
+		supabaseKey = os.Getenv("SUPABASE_ANON_KEY")
+	}
+	bucket := os.Getenv("SUPABASE_STORAGE_BUCKET")
+	if bucket == "" {
+		bucket = "uploads"
+	}
 
 	if supabaseURL != "" && supabaseKey != "" {
-		_ = utils.NewSupabaseUploadService(supabaseURL, supabaseKey, "portfolio")
-		fmt.Println("✅ Supabase Storage enabled")
+		supabaseUploadService = utils.NewSupabaseUploadService(supabaseURL, supabaseKey, bucket)
+		uploadProvider = "supabase"
+		fmt.Println("✅ Supabase Storage initialized")
 	} else {
-		fmt.Println("⚠️  Using Local Storage (set SUPABASE_URL and SUPABASE_KEY for production)")
+		uploadProvider = "local"
+		fmt.Println("⚠️  Supabase Storage not configured, using local storage")
 	}
-
-	// Opsi 2: Local upload service sebagai fallback
-	_ = utils.NewLocalUploadService(uploadBasePath)
 
 	// ============================
 	// PROJECT DEPENDENCIES
 	// ============================
 	projectRepo := projectRPO.NewRepository(db)
-	projectService := projectServsc.NewService(projectRepo, filepath.Join(uploadBasePath, "projects"))
+
+	var projectService projectServsc.Service
+	if uploadProvider == "supabase" && supabaseUploadService != nil {
+		// Create Supabase wrapper
+		supabaseWrapper := projectServsc.NewSupabaseUploadWrapper(supabaseUploadService)
+		// Use existing NewService but pass upload wrapper
+		projectService = projectServsc.NewServiceWithUpload(projectRepo, supabaseWrapper, "projects")
+	} else {
+		// Use local storage
+		localPath := filepath.Join(uploadBasePath, "projects")
+		projectService = projectServsc.NewService(projectRepo, localPath)
+	}
+
 	projectHandler := handlers.NewProjectHandler(projectService)
 
 	memberRepo := repositoryprojek.NewProjectMemberRepo(gormDB)
@@ -88,42 +102,56 @@ func Initiator(router *gin.Engine, db *sql.DB, gormDB *gorm.DB) {
 	// PORTFOLIO DEPENDENCIES
 	// ============================
 
-	// Skills
+	// Skills with upload service
 	skillRepo := portfolioRepo.NewSkillRepository(gormDB)
-	skillService := portfolioService.NewSkillService(skillRepo, filepath.Join(uploadBasePath, "skills"))
+	var skillService portfolioService.SkillService
+	if uploadProvider == "supabase" && supabaseUploadService != nil {
+		supabaseWrapper := portfolioService.NewSupabaseUploadWrapper(supabaseUploadService)
+		skillService = portfolioService.NewSkillServiceWithUpload(skillRepo, supabaseWrapper, "skills")
+	} else {
+		localPath := filepath.Join(uploadBasePath, "skills")
+		skillService = portfolioService.NewSkillService(skillRepo, localPath)
+	}
 	skillHandler := handlers.NewSkillHandler(skillService)
 
-	// Certificates
+	// Certificates with upload service
 	certRepo := portfolioRepo.NewCertificateRepository(gormDB)
-	certService := portfolioService.NewCertificateService(certRepo, filepath.Join(uploadBasePath, "certificates"))
+	var certService portfolioService.CertificateService
+	if uploadProvider == "supabase" && supabaseUploadService != nil {
+		supabaseWrapper := portfolioService.NewSupabaseUploadWrapper(supabaseUploadService)
+		certService = portfolioService.NewCertificateServiceWithUpload(certRepo, supabaseWrapper, "certificates")
+	} else {
+		localPath := filepath.Join(uploadBasePath, "certificates")
+		certService = portfolioService.NewCertificateService(certRepo, localPath)
+	}
 	certHandler := handlers.NewCertificateHandler(certService)
 
-	// Education
+	// Education (no upload needed)
 	eduRepo := portfolioRepo.NewEducationRepository(gormDB)
 	eduService := portfolioService.NewEducationService(eduRepo)
 	eduHandler := handlers.NewEducationHandler(eduService)
 
-	// Testimonials
+	// Testimonials (no upload needed)
 	testRepo := portfolioRepo.NewTestimonialRepository(gormDB)
 	testService := portfolioService.NewTestimonialService(testRepo)
 	testHandler := handlers.NewTestimonialHandler(testService)
 
-	// Blog
+	// Blog (no upload needed)
 	blogRepo := portfolioRepo.NewBlogRepository(gormDB)
 	blogService := portfolioService.NewBlogService(blogRepo)
 	blogHandler := handlers.NewBlogHandler(blogService)
 
-	// Sections
+	// Sections (no upload needed)
 	sectionRepo := portfolioRepo.NewSectionRepository(gormDB)
 	sectionService := portfolioService.NewSectionService(sectionRepo)
 	sectionHandler := handlers.NewSectionHandler(sectionService)
 
-	// Social Links
+	// Social Links (no upload needed)
 	socialLinkRepo := portfolioRepo.NewSocialLinkRepository(gormDB)
 	socialLinkService := portfolioService.NewSocialLinkService(socialLinkRepo)
 	socialLinkHandler := handlers.NewSocialLinkHandler(socialLinkService)
 
-	// Settings
+	// Settings (no upload needed)
 	settingRepo := portfolioRepo.NewSettingRepository(gormDB)
 	settingService := portfolioService.NewSettingService(settingRepo)
 	settingHandler := handlers.NewSettingHandler(settingService)
@@ -138,6 +166,16 @@ func Initiator(router *gin.Engine, db *sql.DB, gormDB *gorm.DB) {
 	// ============================
 	api := router.Group("/api")
 	{
+		// Health check
+		api.GET("/health", func(c *gin.Context) {
+			c.JSON(200, gin.H{
+				"status":    "ok",
+				"service":   "gintugas-api",
+				"timestamp": time.Now().Unix(),
+				"upload":    uploadProvider,
+			})
+		})
+
 		// ============================
 		// PROJECT ROUTES
 		// ============================
@@ -266,28 +304,23 @@ func Initiator(router *gin.Engine, db *sql.DB, gormDB *gorm.DB) {
 	}
 
 	// ============================
-	// SERVE STATIC FILES
+	// SERVE STATIC FILES (Development only)
 	// ============================
-	if os.Getenv("GIN_MODE") != "release" {
+	if os.Getenv("GIN_MODE") != "release" && uploadProvider == "local" {
 		router.Static("/uploads", uploadBasePath)
 		log.Printf("📁 Serving static files from: %s", uploadBasePath)
 	} else {
-		log.Println("ℹ️  In production mode, using external storage for uploads")
+		log.Printf("ℹ️  Using %s storage for uploads", uploadProvider)
 	}
 }
 
 func getUploadPath() string {
-	// Di Koyeb, pakai /tmp karena ephemeral
-	// Atau pakai external storage (S3, Cloudinary, dll)
 	if os.Getenv("GIN_MODE") == "release" {
-		// Untuk Koyeb, pakai /tmp atau volume
 		if path := os.Getenv("UPLOAD_PATH"); path != "" {
 			return path
 		}
 		return "/tmp/uploads"
 	}
-
-	// Untuk development, pakai local folder
 	return "./uploads"
 }
 
@@ -296,7 +329,6 @@ func createUploadDirs(basePath string) {
 		"projects",
 		"skills",
 		"certificates",
-		// tambah folder lainnya
 	}
 
 	for _, dir := range dirs {
