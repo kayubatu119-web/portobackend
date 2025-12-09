@@ -2,6 +2,7 @@ package modules
 
 import (
 	"database/sql"
+	"fmt"
 	handlers "gintugas/modules/ServiceRoute"
 	serviceroute "gintugas/modules/ServiceRoute"
 	projectRPO "gintugas/modules/components/Project/repository"
@@ -9,6 +10,7 @@ import (
 	projectServsc "gintugas/modules/components/Project/service"
 	"gintugas/modules/components/experiences/repo"
 	"gintugas/modules/components/experiences/service"
+	"gintugas/modules/utils"
 	"log"
 	"os"
 	"path/filepath"
@@ -41,6 +43,25 @@ func Initiator(router *gin.Engine, db *sql.DB, gormDB *gorm.DB) {
 	if os.Getenv("GIN_MODE") != "release" {
 		createUploadDirs(uploadBasePath)
 	}
+
+	// ============================
+	// SUPABASE STORAGE SETUP
+	// ============================
+	// Opsi 1: Gunakan Supabase Storage (Production recommended)
+	supabaseURL := os.Getenv("SUPABASE_URL")
+	supabaseKey := os.Getenv("SUPABASE_KEY")
+	_ = supabaseURL // Will use if integrated
+	_ = supabaseKey // Will use if integrated
+
+	if supabaseURL != "" && supabaseKey != "" {
+		_ = utils.NewSupabaseUploadService(supabaseURL, supabaseKey, "portfolio")
+		fmt.Println("✅ Supabase Storage enabled")
+	} else {
+		fmt.Println("⚠️  Using Local Storage (set SUPABASE_URL and SUPABASE_KEY for production)")
+	}
+
+	// Opsi 2: Local upload service sebagai fallback
+	_ = utils.NewLocalUploadService(uploadBasePath)
 
 	// ============================
 	// PROJECT DEPENDENCIES
