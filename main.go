@@ -46,6 +46,20 @@ func main() {
 		}
 	}
 
+	fmt.Println("\n=== ENV VARS ===")
+	for _, env := range []string{
+		"SUPABASE_URL",
+		"SUPABASE_SERVICE_ROLE_KEY",
+		"SUPABASE_STORAGE_BUCKET",
+	} {
+		val := os.Getenv(env)
+		if val == "" {
+			fmt.Printf("❌ %s: (empty)\n", env)
+		} else {
+			fmt.Printf("✅ %s: %s...\n", env, val[:min(10, len(val))])
+		}
+	}
+
 	// Setup database
 	db, gormDB = setupDatabase()
 	defer db.Close()
