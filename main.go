@@ -39,15 +39,8 @@ func main() {
 		log.Println("Warning: .env file not found, using environment variables")
 	}
 
-	psqlInfo := fmt.Sprintf(`host=%s port=%s user=%s password=%s dbname=%s sslmode=disable`,
-		os.Getenv("PGHOST"),
-		os.Getenv("PGPORT"),
-		os.Getenv("PGUSER"),
-		os.Getenv("PGPASSWORD"),
-		os.Getenv("PGDATABASE"),
-	)
-
-	db, err = sql.Open("postgres", psqlInfo)
+	connStr := "user='koyeb-adm' password=npg_SDMVnINEB5Y7 host=ep-floral-thunder-a15lx6os.ap-southeast-1.pg.koyeb.app dbname='koyebdb'"
+	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		log.Fatal("Failed to open database:", err)
 	}
