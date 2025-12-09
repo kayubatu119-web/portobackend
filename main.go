@@ -39,7 +39,7 @@ func main() {
 		log.Println("Warning: .env file not found, using environment variables")
 	}
 
-	connStr := "user='koyeb-adm' password=******* host=ep-floral-thunder-a15lx6os.ap-southeast-1.pg.koyeb.app dbname='koyebdb'"
+	connStr := "user='koyeb-adm' password=npg_SDMVnINEB5Y7 host=ep-floral-thunder-a15lx6os.ap-southeast-1.pg.koyeb.app dbname='koyebdb'"
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		log.Fatal("Failed to open database:", err)
