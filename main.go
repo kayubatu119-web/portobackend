@@ -3,18 +3,18 @@ package main
 import (
 	"database/sql"
 	"fmt"
-	"log"
-	"os"
-
 	"gintugas/database"
 	_ "gintugas/docs"
 	routers "gintugas/modules"
+	"log"
+	"os"
 
 	"github.com/gin-gonic/gin"
-	_ "github.com/jackc/pgx/v5/stdlib" // DRIVER PGX
 	"github.com/joho/godotenv"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+
+	_ "github.com/lib/pq"
 )
 
 // @title Gintugas API
@@ -34,37 +34,32 @@ var (
 )
 
 func main() {
-	// Load env (jika lokal)
-	godotenv.Load("config/.env")
-
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		log.Fatal("DATABASE_URL not found")
+	err = godotenv.Load("config/.env")
+	if err != nil {
+		log.Println("Warning: .env file not found, using environment variables")
 	}
 
-	// Connect SQL (pgx)
-	db, err = sql.Open("pgx", dsn)
+	connStr := "user='koyeb-adm' password=******* host=ep-floral-thunder-a15lx6os.ap-southeast-1.pg.koyeb.app dbname='koyebdb'"
+	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		log.Fatal("Failed to open database:", err)
 	}
 	defer db.Close()
 
-	if err = db.Ping(); err != nil {
-		log.Fatal("Failed to connect:", err)
+	err = db.Ping()
+	if err != nil {
+		log.Fatal("Failed to connect to database:", err)
 	}
 
-	fmt.Println("Berhasil koneksi ke database Koyeb")
+	fmt.Println("Berhasil Koneksi Ke Database")
 
-	// Connect GORM
 	gormDB, err = gorm.Open(postgres.New(postgres.Config{
 		Conn: db,
 	}), &gorm.Config{})
-
 	if err != nil {
 		log.Fatal("Failed to create GORM connection:", err)
 	}
 
-	// Run Auto Migration SQL
 	database.DBMigrate(db)
 
 	InitiateRouter(db, gormDB)
@@ -78,9 +73,11 @@ func InitiateRouter(db *sql.DB, gormDB *gorm.DB) {
 	}
 
 	router.GET("/api/health", healthCheck)
+
 	routers.Initiator(router, db, gormDB)
 
 	log.Printf("Server running on port %s", port)
+	log.Println("Swagger UI available at: http://localhost:8080/swagger/index.html")
 	router.Run(":" + port)
 }
 
