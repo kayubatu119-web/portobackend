@@ -1,135 +1,201 @@
 package main
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
+	"log"
+	"os"
+	"regexp"
+	"strings"
+	"time"
+
 	"gintugas/database"
 	_ "gintugas/docs"
 	routers "gintugas/modules"
-	"log"
-	"os"
-	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool" // IMPORT INI
-	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/joho/godotenv"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+
+	_ "github.com/lib/pq"
+)
+
+// @title Gintugas API
+// @version 1.0
+// @description API untuk manajemen tugas dan proyek
+// @host your-app.koyeb.app
+// @BasePath /api
+// @securityDefinitions.apikey BearerAuth
+// @in header
+// @name Authorization
+// @description JWT Authorization header menggunakan format: Bearer {token}
+
+var (
+	db     *sql.DB
+	gormDB *gorm.DB
+	err    error
 )
 
 func main() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
+	// Load .env hanya untuk development
+	// Di Koyeb, pakai environment variables
+	if os.Getenv("GIN_MODE") != "release" {
+		if err := godotenv.Load("config/.env"); err != nil {
+			log.Println("Using environment variables (no .env file)")
+		}
 	}
 
-	db, gormDB, pool, err := setupDatabaseWithPool()
-	if err != nil {
-		log.Fatal("Database setup failed:", err)
-	}
+	// Setup database
+	db, gormDB = setupDatabase()
 	defer db.Close()
-	defer pool.Close()
 
+	// Run migrations
 	database.DBMigrate(db)
-	startServer(db, gormDB, port)
+
+	// Start server
+	InitiateRouter(db, gormDB)
 }
 
-// METHOD 1: Gunakan pgxpool (RECOMMENDED)
-func setupDatabaseWithPool() (*sql.DB, *gorm.DB, *pgxpool.Pool, error) {
+func setupDatabase() (*sql.DB, *gorm.DB) {
+	// Get database URL dengan SSL enabled
 	dbURL := getDatabaseURL()
 
-	// Parse config untuk pool
-	config, err := pgxpool.ParseConfig(dbURL)
+	log.Printf("Connecting to database with URL: %s", maskPassword(dbURL))
+
+	// Open connection
+	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("parse config failed: %v", err)
+		log.Fatal("Failed to open database:", err)
 	}
 
-	// Configure pool
-	config.MaxConns = 10
-	config.MinConns = 2
-	config.MaxConnLifetime = time.Hour
-	config.MaxConnIdleTime = 30 * time.Minute
+	// Configure connection pool
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
 
-	// Create pool
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	pool, err := pgxpool.NewWithConfig(ctx, config)
+	// Test connection dengan timeout
+	err = pingWithTimeout(db, 10*time.Second)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("create pool failed: %v", err)
+		log.Printf("Database ping error: %v", err)
+		log.Printf("Connection URL: %s", maskPassword(dbURL))
+		log.Fatal("Failed to connect to database. Check SSL configuration.")
 	}
 
-	// Test connection
-	ctxPing, cancelPing := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancelPing()
+	fmt.Println("✅ Berhasil Koneksi Ke Database")
 
-	if err := pool.Ping(ctxPing); err != nil {
-		pool.Close()
-		return nil, nil, nil, fmt.Errorf("ping failed: %v", err)
-	}
-
-	// Convert pool ke database/sql
-	sqlDB := stdlib.OpenDBFromPool(pool)
+	// Test SSL status
+	testSSLStatus(db)
 
 	// Setup GORM
 	gormDB, err := gorm.Open(postgres.New(postgres.Config{
-		Conn: sqlDB,
+		Conn: db,
 	}), &gorm.Config{})
 	if err != nil {
-		sqlDB.Close()
-		pool.Close()
-		return nil, nil, nil, fmt.Errorf("gorm failed: %v", err)
+		log.Fatal("Failed to create GORM connection:", err)
 	}
 
-	log.Println("✅ Database pool connected")
-	return sqlDB, gormDB, pool, nil
+	return db, gormDB
 }
 
 func getDatabaseURL() string {
-	// Priority 1: DATABASE_URL
+	// Priority 1: DATABASE_URL dari environment (sudah include SSL)
 	if url := os.Getenv("DATABASE_URL"); url != "" {
+		// Pastikan ada sslmode=require
+		if !strings.Contains(url, "sslmode=") {
+			if strings.Contains(url, "?") {
+				url += "&sslmode=require"
+			} else {
+				url += "?sslmode=require"
+			}
+		}
 		return url
 	}
 
-	// Priority 2: Koyeb DB
-	host := os.Getenv("PGHOST")
-	user := os.Getenv("PGUSER")
-	pass := os.Getenv("PGPASSWORD")
-	dbname := os.Getenv("PGDATABASE")
-	port := os.Getenv("PGPORT")
+	// Priority 2: Supabase dengan SSL
+	// Password harus di-encode: @ -> %40, # -> %23
+	encodedPass := "Bg3644aa%40%23"
+	supabaseURL := fmt.Sprintf(
+		"postgresql://postgres:%s@db.yiujndqqbacipqozosdm.supabase.co:5432/postgres?sslmode=require&sslmode=require&sslrootcert=system",
+		encodedPass,
+	)
 
-	if host != "" && user != "" {
-		return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=require",
-			user, pass, host, port, dbname)
-	}
-
-	// Default Supabase (encoded password)
-	return "postgresql://postgres:Bg3644aa%40%23@db.yiujndqqbacipqozosdm.supabase.co:5432/postgres?sslmode=require"
+	return supabaseURL
 }
 
-func startServer(db *sql.DB, gormDB *gorm.DB, port string) {
+func testSSLStatus(db *sql.DB) {
+	var sslStatus string
+	err := db.QueryRow("SHOW ssl").Scan(&sslStatus)
+	if err != nil {
+		log.Printf("⚠️ Cannot check SSL status: %v", err)
+	} else {
+		log.Printf("🔒 SSL Status: %s", sslStatus)
+	}
+
+	// Check connection encryption
+	var sslInfo string
+	err = db.QueryRow("SELECT ssl_cipher()").Scan(&sslInfo)
+	if err != nil {
+		log.Printf("⚠️ Cannot check SSL cipher: %v", err)
+	} else if sslInfo != "" {
+		log.Printf("🔐 SSL Cipher: %s", sslInfo)
+	} else {
+		log.Println("❌ SSL NOT ENABLED on connection!")
+	}
+}
+
+func maskPassword(url string) string {
+	// Mask password untuk logging
+	re := regexp.MustCompile(`password=[^&]*`)
+	return re.ReplaceAllString(url, "password=****")
+}
+
+func pingWithTimeout(db *sql.DB, timeout time.Duration) error {
+	done := make(chan error, 1)
+
+	go func() {
+		done <- db.Ping()
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(timeout):
+		return fmt.Errorf("database ping timeout after %v", timeout)
+	}
+}
+
+func InitiateRouter(db *sql.DB, gormDB *gorm.DB) {
+	// Set Gin mode
 	if os.Getenv("GIN_MODE") == "release" {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
 	router := gin.Default()
 
-	// Routes
-	router.GET("/health", func(c *gin.Context) {
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
-		defer cancel()
+	// Get port
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
 
-		if err := db.PingContext(ctx); err != nil {
-			c.JSON(500, gin.H{"status": "error", "error": err.Error()})
+	// Health check
+	router.GET("/health", func(c *gin.Context) {
+		// Check database connection
+		if err := db.Ping(); err != nil {
+			c.JSON(500, gin.H{
+				"status": "error",
+				"error":  "Database disconnected",
+				"time":   time.Now().Format(time.RFC3339),
+			})
 			return
 		}
 
 		c.JSON(200, gin.H{
-			"status":    "ok",
-			"service":   "gintugas",
-			"database":  "connected",
-			"timestamp": time.Now().Unix(),
+			"status":  "ok",
+			"service": "gintugas-api",
+			"time":    time.Now().Format(time.RFC3339),
+			"version": "1.0",
 		})
 	})
 
@@ -137,18 +203,20 @@ func startServer(db *sql.DB, gormDB *gorm.DB, port string) {
 		c.JSON(200, gin.H{
 			"message": "Gintugas API",
 			"version": "1.0",
-			"health":  "/health",
 			"docs":    "/swagger/index.html",
+			"health":  "/health",
 		})
 	})
 
-	// Your routes
+	// API routes
 	routers.Initiator(router, db, gormDB)
 
-	// Swagger
-	router.Static("/swagger", "./docs")
+	// Serve static files (uploads) - untuk Koyeb pakai external storage
+	router.Static("/uploads", "./uploads")
 
-	addr := "0.0.0.0:" + port
-	log.Printf("🚀 Server starting on %s", addr)
-	router.Run(addr)
+	log.Printf("🚀 Server running on port %s", port)
+	log.Println("📚 Swagger UI: http://localhost:" + port + "/swagger/index.html")
+
+	// Bind ke 0.0.0.0 untuk Koyeb
+	router.Run("0.0.0.0:" + port)
 }

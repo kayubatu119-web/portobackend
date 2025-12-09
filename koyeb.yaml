@@ -1,4 +1,4 @@
-name: gintugas-api
+name: gintugas
 services:
   - name: api
     instance_types:
@@ -9,10 +9,10 @@ services:
           paths:
             - /
     regions:
-      - sin  # Singapore (dekat dengan Indonesia)
+      - sin  # Singapore
     scalings:
       min: 1
-      max: 3
+      max: 1
     healthchecks:
       http:
         path: /health
@@ -28,8 +28,8 @@ services:
           # Build stage
           FROM golang:1.21-alpine AS builder
           
-          # Install build dependencies
-          RUN apk add --no-cache git
+          # Install git untuk go mod download
+          RUN apk add --no-cache git ca-certificates
           
           WORKDIR /app
           
@@ -47,26 +47,22 @@ services:
           # Final stage
           FROM alpine:3.18
           
-          # Install CA certificates and timezone data
+          # Install runtime dependencies
           RUN apk --no-cache add ca-certificates tzdata && \
-              mkdir -p /app/sql_migrations
+              mkdir -p /tmp/uploads
           
-          WORKDIR /app
+          WORKDIR /root/
           
-          # Copy binary
+          # Copy binary and required files
           COPY --from=builder /app/main .
           COPY --from=builder /app/sql_migrations ./sql_migrations/
           COPY --from=builder /app/docs ./docs/
           
-          # Create non-root user
+          # Create non-root user (opsional, untuk security)
           RUN addgroup -S appgroup && adduser -S appuser -G appgroup
           USER appuser
           
           EXPOSE 8080
-          
-          # Health check
-          HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-            CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
           
           CMD ["./main"]
     env:
@@ -74,8 +70,12 @@ services:
         value: "8080"
       - name: GIN_MODE
         value: "release"
+      - name: DATABASE_URL
+        value: "postgresql://postgres:Bg3644aa@#@db.yiujndqqbacipqozosdm.supabase.co:5432/postgres?sslmode=require"
       - name: TZ
         value: "Asia/Jakarta"
+      - name: UPLOAD_PATH
+        value: "/tmp/uploads"
     volumes:
-      - path: /tmp
+      - path: /tmp/uploads
         size_gb: 1

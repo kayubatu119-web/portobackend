@@ -9,6 +9,9 @@ import (
 	projectServsc "gintugas/modules/components/Project/service"
 	"gintugas/modules/components/experiences/repo"
 	"gintugas/modules/components/experiences/service"
+	"log"
+	"os"
+	"path/filepath"
 	"time"
 
 	// Import portfolio components
@@ -32,11 +35,18 @@ func Initiator(router *gin.Engine, db *sql.DB, gormDB *gorm.DB) {
 		MaxAge:           12 * time.Hour,
 	}))
 
+	uploadBasePath := getUploadPath()
+
+	// Create upload directories jika tidak ada (untuk development)
+	if os.Getenv("GIN_MODE") != "release" {
+		createUploadDirs(uploadBasePath)
+	}
+
 	// ============================
 	// PROJECT DEPENDENCIES
 	// ============================
 	projectRepo := projectRPO.NewRepository(db)
-	projectService := projectServsc.NewService(projectRepo, "./uploads/projects")
+	projectService := projectServsc.NewService(projectRepo, filepath.Join(uploadBasePath, "projects"))
 	projectHandler := handlers.NewProjectHandler(projectService)
 
 	memberRepo := repositoryprojek.NewProjectMemberRepo(gormDB)
@@ -59,12 +69,12 @@ func Initiator(router *gin.Engine, db *sql.DB, gormDB *gorm.DB) {
 
 	// Skills
 	skillRepo := portfolioRepo.NewSkillRepository(gormDB)
-	skillService := portfolioService.NewSkillService(skillRepo, "./uploads/skills")
+	skillService := portfolioService.NewSkillService(skillRepo, filepath.Join(uploadBasePath, "skills"))
 	skillHandler := handlers.NewSkillHandler(skillService)
 
 	// Certificates
 	certRepo := portfolioRepo.NewCertificateRepository(gormDB)
-	certService := portfolioService.NewCertificateService(certRepo, "./uploads/certificates")
+	certService := portfolioService.NewCertificateService(certRepo, filepath.Join(uploadBasePath, "certificates"))
 	certHandler := handlers.NewCertificateHandler(certService)
 
 	// Education
@@ -237,5 +247,43 @@ func Initiator(router *gin.Engine, db *sql.DB, gormDB *gorm.DB) {
 	// ============================
 	// SERVE STATIC FILES
 	// ============================
-	router.Static("/uploads", "./uploads")
+	if os.Getenv("GIN_MODE") != "release" {
+		router.Static("/uploads", uploadBasePath)
+		log.Printf("📁 Serving static files from: %s", uploadBasePath)
+	} else {
+		log.Println("ℹ️  In production mode, using external storage for uploads")
+	}
+}
+
+func getUploadPath() string {
+	// Di Koyeb, pakai /tmp karena ephemeral
+	// Atau pakai external storage (S3, Cloudinary, dll)
+	if os.Getenv("GIN_MODE") == "release" {
+		// Untuk Koyeb, pakai /tmp atau volume
+		if path := os.Getenv("UPLOAD_PATH"); path != "" {
+			return path
+		}
+		return "/tmp/uploads"
+	}
+
+	// Untuk development, pakai local folder
+	return "./uploads"
+}
+
+func createUploadDirs(basePath string) {
+	dirs := []string{
+		"projects",
+		"skills",
+		"certificates",
+		// tambah folder lainnya
+	}
+
+	for _, dir := range dirs {
+		fullPath := filepath.Join(basePath, dir)
+		if err := os.MkdirAll(fullPath, 0755); err != nil {
+			log.Printf("Warning: Cannot create upload directory %s: %v", fullPath, err)
+		} else {
+			log.Printf("Created upload directory: %s", fullPath)
+		}
+	}
 }
