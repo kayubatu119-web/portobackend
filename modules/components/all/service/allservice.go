@@ -5,6 +5,7 @@ import (
 	"fmt"
 	model "gintugas/modules/components/all/models"
 	"gintugas/modules/components/all/repo"
+	"gintugas/modules/utils"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -33,19 +34,37 @@ type SkillService interface {
 }
 
 type skillService struct {
-	repo       repo.SkillRepository
-	uploadPath string
+	repo          repo.SkillRepository
+	uploadPath    string
+	uploadService UploadServiceWrapper // New: untuk abstraksi upload
 }
 
 func NewSkillService(repo repo.SkillRepository, uploadPath string) SkillService {
-	// Buat folder upload jika belum ada
+	// Buat folder upload jika belum ada (fallback)
 	if err := os.MkdirAll(uploadPath, 0755); err != nil {
 		fmt.Printf("Warning: gagal membuat folder upload skill: %v\n", err)
 	}
 	return &skillService{
 		repo:       repo,
 		uploadPath: uploadPath,
+		uploadService: NewLocalUploadWrapper(
+			utils.NewLocalUploadService(uploadPath),
+		),
 	}
+}
+
+// NewSkillServiceWithSupabase membuat skill service dengan Supabase upload
+func NewSkillServiceWithSupabase(repo repo.SkillRepository, uploadService *utils.SupabaseUploadService) SkillService {
+	return &skillService{
+		repo:          repo,
+		uploadPath:    "", // Tidak perlu untuk Supabase
+		uploadService: NewSupabaseUploadWrapper(uploadService),
+	}
+}
+
+// SetUploadService mengatur upload service (untuk switching antara local/supabase)
+func (s *skillService) SetUploadService(uploadService UploadServiceWrapper) {
+	s.uploadService = uploadService
 }
 
 func (s *skillService) validateFile(file *multipart.FileHeader) error {
@@ -120,21 +139,16 @@ func (s *skillService) CreateWithIcon(ctx *gin.Context) (*model.SkillResponse, e
 	iconURL := ""
 	if file != nil {
 		// Validasi file
-		if err := s.validateFile(file); err != nil {
+		if err := s.uploadService.ValidateFile(file, 5, []string{".jpg", ".jpeg", ".png", ".webp", ".svg", ".ico"}); err != nil {
 			return nil, err
 		}
 
-		// Generate unique filename
-		ext := filepath.Ext(file.Filename)
-		fileName := fmt.Sprintf("skill_%s%s", uuid.New().String(), ext)
-		filePath := filepath.Join(s.uploadPath, fileName)
-
-		// Simpan file
-		if err := ctx.SaveUploadedFile(file, filePath); err != nil {
-			return nil, fmt.Errorf("gagal menyimpan file icon: %v", err)
+		// Upload ke Supabase atau Local storage
+		iconURL, err = s.uploadService.UploadFile(file, "uploads_skills")
+		if err != nil {
+			return nil, fmt.Errorf("gagal upload file icon: %v", err)
 		}
-
-		iconURL = "/uploads/skills/" + fileName
+		fmt.Printf("✅ Skill icon uploaded: %s\n", iconURL)
 	}
 
 	// Set default values
@@ -159,7 +173,7 @@ func (s *skillService) CreateWithIcon(ctx *gin.Context) (*model.SkillResponse, e
 	if err := s.repo.Create(skill); err != nil {
 		// Cleanup file jika gagal save ke database
 		if file != nil && iconURL != "" {
-			os.Remove(filepath.Join(s.uploadPath, filepath.Base(iconURL)))
+			s.uploadService.DeleteFile(iconURL)
 		}
 		return nil, fmt.Errorf("gagal menyimpan data skill: %v", err)
 	}
@@ -241,29 +255,23 @@ func (s *skillService) UpdateWithIcon(ctx *gin.Context) (*model.SkillResponse, e
 	// Jika ada file baru diupload
 	if file != nil {
 		// Validasi file
-		if err := s.validateFile(file); err != nil {
+		if err := s.uploadService.ValidateFile(file, 5, []string{".jpg", ".jpeg", ".png", ".webp", ".svg", ".ico"}); err != nil {
 			return nil, err
 		}
 
-		// Generate unique filename
-		ext := filepath.Ext(file.Filename)
-		fileName := fmt.Sprintf("skill_%s%s", uuid.New().String(), ext)
-		filePath := filepath.Join(s.uploadPath, fileName)
-
-		// Simpan file baru
-		if err := ctx.SaveUploadedFile(file, filePath); err != nil {
-			return nil, fmt.Errorf("gagal menyimpan file icon: %v", err)
+		// Upload file baru
+		newIconURL, err := s.uploadService.UploadFile(file, "uploads_skills")
+		if err != nil {
+			return nil, fmt.Errorf("gagal upload file icon: %v", err)
 		}
 
 		// Hapus file lama jika ada
 		if existing.IconURL != "" {
-			oldFileName := filepath.Base(existing.IconURL)
-			oldFilePath := filepath.Join(s.uploadPath, oldFileName)
-			os.Remove(oldFilePath) // Ignore error jika file tidak ada
+			s.uploadService.DeleteFile(existing.IconURL)
 		}
 
-		// Update icon URL
-		existing.IconURL = "/uploads/skills/" + fileName
+		// Update icon URL dengan yang baru
+		existing.IconURL = newIconURL
 	}
 
 	// Update fields lainnya
@@ -282,8 +290,8 @@ func (s *skillService) UpdateWithIcon(ctx *gin.Context) (*model.SkillResponse, e
 
 	if err := s.repo.Update(existing); err != nil {
 		// Cleanup file baru jika gagal update
-		if file != nil {
-			os.Remove(filepath.Join(s.uploadPath, filepath.Base(existing.IconURL)))
+		if file != nil && existing.IconURL != "" {
+			s.uploadService.DeleteFile(existing.IconURL)
 		}
 		return nil, fmt.Errorf("gagal mengupdate data skill: %v", err)
 	}
@@ -303,11 +311,12 @@ func (s *skillService) Delete(ctx *gin.Context) error {
 		return err
 	}
 
-	// Hapus file icon jika ada
+	// Hapus file icon dari Supabase atau local storage jika ada
 	if skill.IconURL != "" {
-		fileName := filepath.Base(skill.IconURL)
-		filePath := filepath.Join(s.uploadPath, fileName)
-		os.Remove(filePath) // Ignore error jika file tidak ada
+		if err := s.uploadService.DeleteFile(skill.IconURL); err != nil {
+			fmt.Printf("⚠️ Warning: gagal hapus file icon: %v\n", err)
+			// Jangan return error, lanjut delete dari DB
+		}
 	}
 
 	return s.repo.Delete(id)
@@ -384,8 +393,9 @@ type CertificateService interface {
 }
 
 type certificateService struct {
-	repo       repo.CertificateRepository
-	uploadPath string
+	repo          repo.CertificateRepository
+	uploadPath    string
+	uploadService UploadServiceWrapper
 }
 
 func NewCertificateService(repo repo.CertificateRepository, uploadPath string) CertificateService {
@@ -396,6 +406,18 @@ func NewCertificateService(repo repo.CertificateRepository, uploadPath string) C
 	return &certificateService{
 		repo:       repo,
 		uploadPath: uploadPath,
+		uploadService: NewLocalUploadWrapper(
+			utils.NewLocalUploadService(uploadPath),
+		),
+	}
+}
+
+// NewCertificateServiceWithSupabase membuat certificate service dengan Supabase upload
+func NewCertificateServiceWithSupabase(repo repo.CertificateRepository, uploadService *utils.SupabaseUploadService) CertificateService {
+	return &certificateService{
+		repo:          repo,
+		uploadPath:    "",
+		uploadService: NewSupabaseUploadWrapper(uploadService),
 	}
 }
 
@@ -464,19 +486,16 @@ func (s *certificateService) CreateWithImage(ctx *gin.Context) (*model.Certifica
 	}
 
 	// Validasi file
-	if err := s.validateFile(file); err != nil {
+	if err := s.uploadService.ValidateFile(file, 10, []string{".jpg", ".jpeg", ".png", ".webp", ".pdf"}); err != nil {
 		return nil, err
 	}
 
-	// Generate unique filename
-	ext := filepath.Ext(file.Filename)
-	fileName := fmt.Sprintf("certificate_%s%s", uuid.New().String(), ext)
-	filePath := filepath.Join(s.uploadPath, fileName)
-
-	// Simpan file
-	if err := ctx.SaveUploadedFile(file, filePath); err != nil {
-		return nil, fmt.Errorf("gagal menyimpan file: %v", err)
+	// Upload ke Supabase atau Local storage
+	imageURL, err := s.uploadService.UploadFile(file, "uploads_certificates")
+	if err != nil {
+		return nil, fmt.Errorf("gagal upload file: %v", err)
 	}
+	fmt.Printf("✅ Certificate image uploaded: %s\n", imageURL)
 
 	// Parse issue date
 	var issueDate time.Time
@@ -484,7 +503,7 @@ func (s *certificateService) CreateWithImage(ctx *gin.Context) (*model.Certifica
 		parsedDate, err := time.Parse("2006-01-02", form.IssueDate)
 		if err != nil {
 			// Cleanup file jika parsing gagal
-			os.Remove(filePath)
+			s.uploadService.DeleteFile(imageURL)
 			return nil, fmt.Errorf("format tanggal tidak valid, gunakan format YYYY-MM-DD: %v", err)
 		}
 		issueDate = parsedDate
@@ -501,7 +520,7 @@ func (s *certificateService) CreateWithImage(ctx *gin.Context) (*model.Certifica
 	// Create certificate entity
 	cert := &model.Certificate{
 		Name:          form.Name,
-		ImageURL:      "/uploads/certificates/" + fileName, // Relative path
+		ImageURL:      imageURL, // Full URL dari Supabase atau local
 		IssueDate:     issueDate,
 		Issuer:        form.Issuer,
 		CredentialURL: form.CredentialURL,
@@ -511,7 +530,7 @@ func (s *certificateService) CreateWithImage(ctx *gin.Context) (*model.Certifica
 	// Save to database
 	if err := s.repo.Create(cert); err != nil {
 		// Cleanup file jika gagal save ke database
-		os.Remove(filePath)
+		s.uploadService.DeleteFile(imageURL)
 		return nil, fmt.Errorf("gagal menyimpan data sertifikat: %v", err)
 	}
 
@@ -581,36 +600,26 @@ func (s *certificateService) Delete(ctx *gin.Context) error {
 	idStr := ctx.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		return errors.New("ID sertif tidak valid")
+		return errors.New("ID sertifikat tidak valid")
 	}
 
-	// Check if project exists dan ambil datanya
-	existingsertif, err := s.repo.GetByID(id)
+	// Get certificate data untuk hapus file
+	cert, err := s.repo.GetByID(id)
 	if err != nil {
-		return errors.New("sertif tidak ditemukan")
+		return errors.New("sertifikat tidak ditemukan")
 	}
 
 	// Delete dari database terlebih dahulu
 	err = s.repo.Delete(id)
 	if err != nil {
-		return fmt.Errorf("gagal menghapus sertif: %v", err)
+		return fmt.Errorf("gagal menghapus sertifikat: %v", err)
 	}
 
-	// Hapus file image jika ada dan bukan default
-	if existingsertif.ImageURL != "" && existingsertif.ImageURL != "#" {
-		fileName := filepath.Base(existingsertif.ImageURL)
-		filePath := filepath.Join(s.uploadPath, fileName)
-
-		if _, err := os.Stat(filePath); err == nil {
-			// File exists, hapus
-			if err := os.Remove(filePath); err != nil {
-				// Log error tapi jangan return error karena data sudah terhapus dari DB
-				fmt.Printf("⚠️ Warning: gagal menghapus file %s: %v\n", filePath, err)
-			} else {
-				fmt.Printf("✅ File deleted successfully: %s\n", filePath)
-			}
-		} else {
-			fmt.Printf("ℹ️ File not found, skipping deletion: %s\n", filePath)
+	// Hapus file image dari Supabase atau local storage jika ada
+	if cert.ImageURL != "" && cert.ImageURL != "#" {
+		if err := s.uploadService.DeleteFile(cert.ImageURL); err != nil {
+			fmt.Printf("⚠️ Warning: gagal menghapus file image: %v\n", err)
+			// Jangan return error karena data sudah terhapus dari DB
 		}
 	}
 

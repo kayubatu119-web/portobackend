@@ -5,6 +5,7 @@ import (
 	"fmt"
 	. "gintugas/modules/components/Project/model"
 	. "gintugas/modules/components/Project/repository"
+	"gintugas/modules/utils"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -29,8 +30,9 @@ type TagsService interface {
 }
 
 type projectService struct {
-	repository Repository
-	uploadPath string
+	repository    Repository
+	uploadPath    string
+	uploadService UploadServiceWrapper
 }
 
 func NewService(repository Repository, uploadPath string) Service {
@@ -40,6 +42,18 @@ func NewService(repository Repository, uploadPath string) Service {
 	return &projectService{
 		repository: repository,
 		uploadPath: uploadPath,
+		uploadService: NewLocalUploadWrapper(
+			utils.NewLocalUploadService(uploadPath),
+		),
+	}
+}
+
+// NewServiceWithSupabase membuat project service dengan Supabase upload
+func NewServiceWithSupabase(repository Repository, uploadService *utils.SupabaseUploadService) Service {
+	return &projectService{
+		repository:    repository,
+		uploadPath:    "",
+		uploadService: NewSupabaseUploadWrapper(uploadService),
 	}
 }
 
