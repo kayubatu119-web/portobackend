@@ -1,8 +1,11 @@
 package projectservice
 
 import (
+	"fmt"
 	"gintugas/modules/utils"
 	"mime/multipart"
+	"path/filepath"
+	"strings"
 )
 
 // UploadServiceWrapper adalah interface untuk abstraksi upload service
@@ -24,6 +27,10 @@ func NewSupabaseUploadWrapper(service *utils.SupabaseUploadService) *SupabaseUpl
 }
 
 func (s *SupabaseUploadWrapper) UploadFile(file *multipart.FileHeader, folder string) (string, error) {
+	if err := s.ValidateFile(file, 10, []string{".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".pdf"}); err != nil {
+		return "", err
+	}
+
 	return s.service.UploadFile(file, folder)
 }
 
@@ -32,7 +39,25 @@ func (s *SupabaseUploadWrapper) DeleteFile(fileURL string) error {
 }
 
 func (s *SupabaseUploadWrapper) ValidateFile(file *multipart.FileHeader, maxSizeMB int64, allowedExts []string) error {
-	return s.ValidateFile(file, maxSizeMB, allowedExts)
+	if file == nil {
+		return nil
+	}
+
+	// Ukuran file
+	maxSize := maxSizeMB * 1024 * 1024
+	if file.Size > maxSize {
+		return fmt.Errorf("ukuran file maksimal %dMB", maxSizeMB)
+	}
+
+	// Extension
+	ext := strings.ToLower(filepath.Ext(file.Filename))
+	for _, allowed := range allowedExts {
+		if ext == allowed {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("tipe file tidak diizinkan. File yang diizinkan: %s", strings.Join(allowedExts, ", "))
 }
 
 // LocalUploadWrapper adalah wrapper untuk Local Upload Service
